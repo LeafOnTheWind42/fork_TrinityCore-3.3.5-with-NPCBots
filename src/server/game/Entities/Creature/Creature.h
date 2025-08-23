@@ -31,6 +31,7 @@
 // npcbot
 class bot_ai;
 class bot_pet_ai;
+class Battleground;
 //end npcbot
 
 class CreatureAI;
@@ -203,6 +204,10 @@ class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public Ma
         std::string const& GetAIName() const;
         std::string GetScriptName() const;
         uint32 GetScriptId() const;
+        void InheritStringIds(Creature const* parent);
+        bool HasStringId(std::string_view id) const;
+        void SetScriptStringId(std::string id);
+        std::string_view GetStringId(StringIdType type) const { return m_stringIds[size_t(type)] ? std::string_view(*m_stringIds[size_t(type)]) : std::string_view(); }
 
         // override WorldObject function for proper name localization
         std::string const& GetNameForLocaleIdx(LocaleConstant locale_idx) const override;
@@ -380,13 +385,25 @@ class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public Ma
         void ExitVehicle(Position const* exitPosition = nullptr) override;
 
         //NPCBots
-        bool LoadBotCreatureFromDB(uint32 guid, Map* map, bool addToMap = true);
+        bool LoadBotCreatureFromDB(ObjectGuid::LowType guid, Map* map, bool addToMap = true, bool generated = false, uint32 entry = 0, Position const* pos = nullptr);
         Player* GetBotOwner() const;
         Unit* GetBotsPet() const;
-        bool IsNPCBot() const;
-        bool IsNPCBotPet() const;
-        bool IsNPCBotOrPet() const;
+        bool IsNPCBot() const override;
+        bool IsNPCBotPet() const override;
+        bool IsNPCBotOrPet() const override;
         bool IsFreeBot() const;
+        bool IsWandererBot() const;
+        Group* GetBotGroup() const;
+        void SetBotGroup(Group* group, int8 subgroup = -1);
+        uint8 GetSubGroup() const;
+        void SetSubGroup(uint8 subgroup);
+        void SetBattlegroundOrBattlefieldRaid(Group* group, int8 subgroup = -1);
+        void RemoveFromBattlegroundOrBattlefieldRaid();
+        Group* GetOriginalGroup() const;
+        void SetOriginalGroup(Group* group, int8 subgroup = -1);
+        uint8 GetOriginalSubGroup() const;
+        void SetOriginalSubGroup(uint8 subgroup);
+        Battleground* GetBotBG() const;
         uint8 GetBotClass() const;
         uint32 GetBotRoles() const;
         bot_ai* GetBotAI() const { return bot_AI; }
@@ -400,11 +417,12 @@ class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public Ma
         void ApplyBotCritMultiplierAll(Unit const* victim, float& crit_chance, SpellInfo const* spellInfo, SpellSchoolMask schoolMask, WeaponAttackType attackType) const;
         void ApplyCreatureSpellCostMods(SpellInfo const* spellInfo, int32& cost) const;
         void ApplyCreatureSpellCastTimeMods(SpellInfo const* spellInfo, int32& casttime) const;
+        void ApplyCreatureSpellNotLoseCastTimeMods(SpellInfo const* spellInfo, int32& delayReduce) const;
         void ApplyCreatureSpellRadiusMods(SpellInfo const* spellInfo, float& radius) const;
         void ApplyCreatureSpellRangeMods(SpellInfo const* spellInfo, float& maxrange) const;
         void ApplyCreatureSpellMaxTargetsMods(SpellInfo const* spellInfo, uint32& targets) const;
         void ApplyCreatureSpellChanceOfSuccessMods(SpellInfo const* spellInfo, float& chance) const;
-        void ApplyCreatureEffectMods(WorldObject const* wtarget, SpellInfo const* spellInfo, uint8 effIndex, float& value) const;
+        void ApplyCreatureEffectMods(SpellInfo const* spellInfo, uint8 effIndex, float& value) const;
         void OnBotSummon(Creature* summon);
         void OnBotDespawn(Creature* summon);
         void BotStopMovement();
@@ -444,8 +462,6 @@ class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public Ma
         Item* GetBotEquips(uint8 slot) const;
         Item* GetBotEquipsByGuid(ObjectGuid itemGuid) const;
         float GetBotAverageItemLevel() const;
-
-        static bool IsBotCustomSpell(uint32 spellId);
         //End NPCBots
 
     protected:
@@ -495,6 +511,8 @@ class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public Ma
 
         CreatureTemplate const* m_creatureInfo;                 // Can differ from sObjectMgr->GetCreatureTemplate(GetEntry()) in difficulty mode > 0
         CreatureData const* m_creatureData;
+        std::array<std::string const*, 3> m_stringIds;
+        Optional<std::string> m_scriptStringId;
 
         uint16 m_LootMode;                                  // Bitmask (default: LOOT_MODE_DEFAULT) that determines what loot will be lootable
 

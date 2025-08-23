@@ -1,6 +1,7 @@
 #include "bot_ai.h"
 #include "bot_GridNotifiers.h"
 #include "botspell.h"
+#include "Containers.h"
 #include "ScriptMgr.h"
 #include "SpellAuraEffects.h"
 #include "TemporarySummon.h"
@@ -110,7 +111,7 @@ public:
         void JustEnteredCombat(Unit* u) override { bot_ai::JustEnteredCombat(u); }
         void EnterEvadeMode(EvadeReason why = EVADE_REASON_OTHER) override { bot_ai::EnterEvadeMode(why); }
         void MoveInLineOfSight(Unit* u) override { bot_ai::MoveInLineOfSight(u); }
-        void JustDied(Unit* u) override { UnsummonAll(); bot_ai::JustDied(u); }
+        void JustDied(Unit* u) override { UnsummonAll(false); bot_ai::JustDied(u); }
         void DoNonCombatActions(uint32 /*diff*/) { }
 
         void KilledUnit(Unit* u) override
@@ -177,33 +178,43 @@ public:
             if (IsCasting())
                 return;
 
+            CheckUsableItems(diff);
+
             DoRangedAttack(diff);
         }
 
         void DoRangedAttack(uint32 diff)
         {
-            StartAttack(opponent, IsMelee());
+            Unit* mytar = opponent ? opponent : disttarget ? disttarget : nullptr;
+            if (!mytar)
+                return;
+
+            StartAttack(mytar, IsMelee());
+
+            CheckAttackState();
+            if (!me->IsAlive() || !mytar->IsAlive())
+                return;
 
             Counter(diff);
 
             CheckBlackArrow(diff);
 
-            MoveBehind(opponent);
+            MoveBehind(mytar);
 
-            float dist = me->GetDistance(opponent);
+            float dist = me->GetDistance(mytar);
             float maxRangeLong = 30.f;
 
-            bool inpostion = !opponent->HasAuraType(SPELL_AURA_MOD_CONFUSE) || dist > maxRangeLong - 15.f;
+            bool inpostion = !mytar->HasAuraType(SPELL_AURA_MOD_CONFUSE) || dist > maxRangeLong - 15.f;
 
             //Auto Shot
             if (Spell const* shot = me->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
             {
-                if (shot->GetSpellInfo()->Id == AUTO_SHOT_1 && (shot->m_targets.GetUnitTarget() != opponent || !inpostion))
+                if (shot->GetSpellInfo()->Id == AUTO_SHOT_1 && (shot->m_targets.GetUnitTarget() != mytar || !inpostion))
                     me->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
             }
             else if (HasRole(BOT_ROLE_DPS)/* && dist > 5*/ && dist < maxRangeLong)
             {
-                if (doCast(opponent, AUTO_SHOT_1))
+                if (doCast(mytar, AUTO_SHOT_1))
                 {}
             }
 
@@ -213,9 +224,9 @@ public:
 
             //Black Arrow
             if (IsSpellReady(BLACK_ARROW_1, diff) && HasRole(BOT_ROLE_DPS) &&
-                (Rand() < 20 || !opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x0, 0x4, 0x0, me->GetGUID())))
+                (Rand() < 20 || !mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x0, 0x4, 0x0, me->GetGUID())))
             {
-                if (doCast(opponent, GetSpell(BLACK_ARROW_1)))
+                if (doCast(mytar, GetSpell(BLACK_ARROW_1)))
                     return;
             }
         }
@@ -242,7 +253,7 @@ public:
             std::list<Unit*> targets;
             GetNearbyTargetsList(targets, 50, 0);
             targets.remove_if(BOTAI_PRED::AuraedTargetExcludeByCaster(BLACK_ARROW_1, me->GetGUID()));
-            if (Unit* target = !targets.empty() ? Trinity::Containers::SelectRandomContainerElement(targets) : nullptr)
+            if (Unit* target = !targets.empty() ? Bcore::Containers::SelectRandomContainerElement(targets) : nullptr)
             {
                 if (doCast(target, GetSpell(BLACK_ARROW_1)))
                     return;
@@ -294,7 +305,7 @@ public:
             damage = int32(fdamage * pctbonus + flat_mod);
         }
 
-        void ApplyClassEffectMods(WorldObject const* /*wtarget*/, SpellInfo const* spellInfo, uint8 effIndex, float& value) const override
+        void ApplyClassEffectMods(SpellInfo const* spellInfo, uint8 effIndex, float& value) const override
         {
             uint32 baseId = spellInfo->GetFirstRankSpell()->Id;
             //uint8 lvl = me->GetLevel();
@@ -316,7 +327,7 @@ public:
             //if (baseId == AIMED_SHOT_1 || baseId == ARCANE_SHOT_1 || baseId == CHIMERA_SHOT_1)
             //{
             //    if (AuraEffect const* rapi = me->GetAuraEffect(RAPID_KILLING_BUFF, 0))
-            //        if (rapi->IsAffectedOnSpell(spellInfo))
+            //        if (rapi->IsAffectingSpell(spellInfo))
             //            me->RemoveAura(RAPID_KILLING_BUFF);
             //}
         }
@@ -408,7 +419,7 @@ public:
         {
             if (_minions.size() >= MAX_MINIONS)
             {
-                //TC_LOG_ERROR("entities.player", "bot_dranger_ai::SummonBotPet(): max minions");
+                //BOT_LOG_ERROR("entities.player", "bot_dranger_ai::SummonBotPet(): max minions");
                 Unit* u = nullptr;
                 //try 1: by minimal level
                 uint8 minlevel = me->GetLevel();
@@ -420,10 +431,10 @@ public:
                         u = *itr;
                     }
                 }
-                //try 2: by minimal duration
+                //try 2: by minimal duration (if expiring already)
                 if (!u)
                 {
-                    uint32 minduration = 0;
+                    uint32 minduration = static_cast<uint32>((*_minions.begin())->GetAI()->GetData(BOTPETAI_MISC_DURATION_MAX) * 3 / 4);
                     for (Summons::const_iterator itr = _minions.begin(); itr != _minions.end(); ++itr)
                     {
                         if ((*itr)->GetAI()->GetData(BOTPETAI_MISC_DURATION) > minduration)
@@ -433,13 +444,9 @@ public:
                         }
                     }
                 }
-                //if (u)
-                //    TC_LOG_ERROR("entities.player", "bot_dranger_ai::SummonBotPet(): found minion to erase(1)");
-                //try 3: last resort
+
                 if (!u)
-                    u = *(_minions.begin());
-                //if (u)
-                //    TC_LOG_ERROR("entities.player", "bot_dranger_ai::SummonBotPet(): found minion to erase(2)");
+                    return;
 
                 u->ToTempSummon()->UnSummon();
             }
@@ -460,13 +467,12 @@ public:
 
             Position pos = from->GetPosition();
 
-            Creature* myPet = me->SummonCreature(entry, pos, TEMPSUMMON_MANUAL_DESPAWN);
-            myPet->SetCreatorGUID(master->GetGUID());
-            myPet->SetOwnerGUID(master->GetGUID());
+            Creature* myPet = me->SummonCreature(entry, pos, TEMPSUMMON_CORPSE_TIMED_DESPAWN, 1s);
+            myPet->SetCreator(master);
+            myPet->SetOwnerGUID(me->GetGUID());
             myPet->SetFaction(master->GetFaction());
             myPet->SetControlledByPlayer(!IAmFree());
             myPet->SetPvP(me->IsPvP());
-            myPet->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
             myPet->SetByteValue(UNIT_FIELD_BYTES_2, 1, master->GetByteValue(UNIT_FIELD_BYTES_2, 1));
             myPet->SetUInt32Value(UNIT_CREATED_BY_SPELL, BLACK_ARROW_1);
 
@@ -495,19 +501,14 @@ public:
             _minions.insert(myPet);
         }
 
-        void UnsummonAll() override
+        void UnsummonAll(bool savePets = true) override
         {
-            while (!_minions.empty())
-                (*_minions.begin())->ToTempSummon()->UnSummon();
-            //for (Summons::const_iterator itr = _minions.begin(); itr != _minions.end(); ++itr)
-            //    (*itr)->ToTempSummon()->UnSummon();
-
-            //_minions.clear();
+            UnsummonCreatures(_minions, savePets);
         }
 
         void SummonedCreatureDies(Creature* /*summon*/, Unit* /*killer*/) override
         {
-            //TC_LOG_ERROR("entities.unit", "SummonedCreatureDies: %s's %s", me->GetName().c_str(), summon->GetName().c_str());
+            //BOT_LOG_ERROR("entities.unit", "SummonedCreatureDies: {}'s {}", me->GetName(), summon->GetName());
             //if (summon == botPet)
             //    botPet = nullptr;
         }
@@ -515,7 +516,7 @@ public:
         void SummonedCreatureDespawn(Creature* summon) override
         {
             //all darkranger bot pets despawn at death or manually (gossip, teleport, etc.)
-            //TC_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: %s's %s", me->GetName().c_str(), summon->GetName().c_str());
+            //BOT_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: {}'s {}", me->GetName(), summon->GetName());
             if (_minions.find(summon) != _minions.end())
                 _minions.erase(summon);
         }
@@ -538,7 +539,7 @@ public:
 
         void Reset() override
         {
-            UnsummonAll();
+            UnsummonAll(false);
 
             //for (uint8 i = 0; i != MAX_SPELL_SCHOOL; ++i)
             //    me->m_threatModifier[1] = 0.0f;
@@ -593,7 +594,7 @@ public:
         //}
     private:
         ObjectGuid _blackArrowKillGUID;
-        typedef std::set<Unit*> Summons;
+        typedef std::set<Creature*> Summons;
         Summons _minions;
     };
 };

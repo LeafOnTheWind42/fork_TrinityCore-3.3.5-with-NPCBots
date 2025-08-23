@@ -121,7 +121,7 @@ public:
 
         //npcbot
         CreatureTemplate const* cinfo = sObjectMgr->GetCreatureTemplate(id);
-        if (cinfo && ((cinfo->flags_extra & CREATURE_FLAG_EXTRA_NPCBOT) || (cinfo->flags_extra & CREATURE_FLAG_EXTRA_NPCBOT_PET)))
+        if (cinfo && cinfo->IsNPCBotOrPet())
         {
             handler->PSendSysMessage("You tried to spawn creature %u, which is part of NPCBots mod. To spawn bots use '.npcbot spawn' instead.", id);
             handler->SetSentErrorMessage(true);
@@ -527,9 +527,11 @@ public:
         handler->PSendSysMessage(LANG_NPCINFO_ARMOR, target->GetArmor());
         handler->PSendSysMessage(LANG_NPCINFO_POSITION, target->GetPositionX(), target->GetPositionY(), target->GetPositionZ());
         handler->PSendSysMessage(LANG_OBJECTINFO_AIINFO, target->GetAIName().c_str(), target->GetScriptName().c_str());
+        handler->PSendSysMessage(LANG_OBJECTINFO_STRINGIDS, STRING_VIEW_FMT_ARG(target->GetStringId(StringIdType::Template)),
+            STRING_VIEW_FMT_ARG(target->GetStringId(StringIdType::Spawn)), STRING_VIEW_FMT_ARG(target->GetStringId(StringIdType::Script)));
         handler->PSendSysMessage(LANG_NPCINFO_REACTSTATE, DescribeReactState(target->GetReactState()));
         if (CreatureAI const* ai = target->AI())
-            handler->PSendSysMessage(LANG_OBJECTINFO_AITYPE, GetTypeName(*ai).c_str());
+            handler->PSendSysMessage(LANG_OBJECTINFO_AITYPE, Trinity::GetTypeName(*ai).c_str());
         handler->PSendSysMessage(LANG_NPCINFO_FLAGS_EXTRA, cInfo->flags_extra);
         for (CreatureFlagsExtra flag : EnumUtils::Iterate<CreatureFlagsExtra>())
             if (cInfo->flags_extra & flag)
@@ -624,7 +626,7 @@ public:
         //npcbot
         CreatureTemplate const* ct = sObjectMgr->GetCreatureTemplate(data->id);
         ASSERT(ct);
-        if ((ct->flags_extra & (CREATURE_FLAG_EXTRA_NPCBOT | CREATURE_FLAG_EXTRA_NPCBOT_PET)) != 0)
+        if (ct->IsNPCBotOrPet())
         {
             handler->PSendSysMessage("creature %u (id %u) is a part of NPCBots mod. Use '.npcbot move' instead", lowguid, data->id);
             handler->SetSentErrorMessage(true);
@@ -1153,7 +1155,7 @@ public:
                 continue;
             ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(pair.first);
             Player const* player = ObjectAccessor::FindConnectedPlayer(guid);
-            handler->PSendSysMessage(LANG_COMMAND_NPC_SHOWLOOT_SUBLABEL, player ? player->GetName() : Trinity::StringFormat("Offline player (GuidLow 0x%08x)", pair.first).c_str(), pair.second->size());
+            handler->PSendSysMessage(LANG_COMMAND_NPC_SHOWLOOT_SUBLABEL, player ? player->GetName() : Trinity::StringFormat("Offline player ({})", pair.first.ToString()), pair.second->size());
 
             for (auto it = pair.second->cbegin(); it != pair.second->cend(); ++it)
             {

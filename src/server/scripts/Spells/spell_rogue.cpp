@@ -75,7 +75,7 @@ class spell_rog_blade_flurry : public AuraScript
 
     bool CheckProc(ProcEventInfo& eventInfo)
     {
-        _procTarget = eventInfo.GetActor()->SelectNearbyTarget(eventInfo.GetProcTarget());
+        _procTarget = eventInfo.GetActor()->SelectNearbyTarget(eventInfo.GetActionTarget());
         return _procTarget != nullptr;
     }
 
@@ -115,7 +115,7 @@ class spell_rog_cheat_death : public AuraScript
     {
         absorbChance = GetEffectInfo(EFFECT_0).CalcValue();
         //npcbot
-        if (GetUnitOwner()->GetTypeId() == TYPEID_UNIT && GetUnitOwner()->ToCreature()->IsNPCBot())
+        if (GetUnitOwner()->IsNPCBot())
             return true;
         //end npcbot
         return GetUnitOwner()->GetTypeId() == TYPEID_PLAYER;
@@ -215,7 +215,7 @@ class spell_rog_deadly_brew : public AuraScript
     void HandleProc(AuraEffect const* aurEff, ProcEventInfo& eventInfo)
     {
         PreventDefaultAction();
-        eventInfo.GetActor()->CastSpell(eventInfo.GetProcTarget(), SPELL_ROGUE_CRIPPLING_POISON, aurEff);
+        eventInfo.GetActor()->CastSpell(eventInfo.GetActionTarget(), SPELL_ROGUE_CRIPPLING_POISON, aurEff);
     }
 
     void Register() override
@@ -279,7 +279,7 @@ class spell_rog_deadly_poison : public SpellScript
                     SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(enchant->EffectArg[s]);
                     if (!spellInfo)
                     {
-                        TC_LOG_ERROR("spells", "Player::CastItemCombatSpell Enchant %i, player (Name: %s, %s) cast unknown spell %i", enchant->ID, player->GetName().c_str(), player->GetGUID().ToString().c_str(), enchant->EffectArg[s]);
+                        TC_LOG_ERROR("spells", "Player::CastItemCombatSpell Enchant {}, player (Name: {}, {}) cast unknown spell {}", enchant->ID, player->GetName(), player->GetGUID().ToString(), enchant->EffectArg[s]);
                         continue;
                     }
 
@@ -462,6 +462,16 @@ class spell_rog_overkill_mos : public AuraScript
         return ValidateSpellInfo({ RemoveSpellId });
     }
 
+    void AfterApply(AuraEffect const* aurEff, AuraEffectHandleModes /*mode*/)
+    {
+        if (Aura* visualAura = GetTarget()->GetAura(RemoveSpellId))
+        {
+            int32 duration = aurEff->GetBase()->GetDuration();
+            visualAura->SetDuration(duration);
+            visualAura->SetMaxDuration(duration);
+        }
+    }
+
     void PeriodicTick(AuraEffect const* /*aurEff*/)
     {
         GetTarget()->RemoveAurasDueToSpell(RemoveSpellId);
@@ -469,6 +479,7 @@ class spell_rog_overkill_mos : public AuraScript
 
     void Register() override
     {
+        AfterEffectApply += AuraEffectApplyFn(spell_rog_overkill_mos::AfterApply, EFFECT_0, SPELL_AURA_PERIODIC_DUMMY, AURA_EFFECT_HANDLE_REAL);
         OnEffectPeriodic += AuraEffectPeriodicFn(spell_rog_overkill_mos::PeriodicTick, EFFECT_0, SPELL_AURA_PERIODIC_DUMMY);
     }
 };
@@ -593,7 +604,7 @@ class spell_rog_rupture : public SpellScriptLoader
                 Unit* caster = GetCaster();
                 BonusDuration = 0;
                 //npcbot
-                if (caster && caster->GetTypeId() == TYPEID_UNIT && caster->ToCreature()->IsNPCBot())
+                if (caster && caster->IsNPCBot())
                     return true;
                 //end npcbot
                 return caster && caster->GetTypeId() == TYPEID_PLAYER;
@@ -671,7 +682,7 @@ class spell_rog_glyph_of_backstab : public AuraScript
     void HandleProc(AuraEffect const* aurEff, ProcEventInfo& eventInfo)
     {
         PreventDefaultAction();
-        eventInfo.GetActor()->CastSpell(eventInfo.GetProcTarget(), SPELL_ROGUE_GLYPH_OF_BACKSTAB_TRIGGER, aurEff);
+        eventInfo.GetActor()->CastSpell(eventInfo.GetActionTarget(), SPELL_ROGUE_GLYPH_OF_BACKSTAB_TRIGGER, aurEff);
     }
 
     void Register() override

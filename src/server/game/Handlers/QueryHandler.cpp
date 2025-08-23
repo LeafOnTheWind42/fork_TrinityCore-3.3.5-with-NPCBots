@@ -18,6 +18,7 @@
 #include "WorldSession.h"
 #include "CharacterCache.h"
 #include "Common.h"
+#include "Corpse.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
 #include "GameTime.h"
@@ -28,11 +29,51 @@
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "QueryPackets.h"
+#include "Transport.h"
 #include "UpdateMask.h"
 #include "World.h"
 
+//npcbot
+#include "CreatureData.h"
+#include "botdatamgr.h"
+#include "botmgr.h"
+//end npcbot
+
 void WorldSession::SendNameQueryOpcode(ObjectGuid guid)
 {
+    //npcbot: try query bot info
+    if (guid.IsCreature())
+    {
+        uint32 creatureId = guid.GetEntry();
+        CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureId);
+        if (creatureTemplate && creatureTemplate->IsNPCBot())
+        {
+            std::string creatureName = creatureTemplate->Name;
+            if (CreatureLocale const* creatureInfo = sObjectMgr->GetCreatureLocale(creatureId))
+            {
+                uint32 loc = GetSessionDbLocaleIndex();
+                if (creatureInfo->Name.size() > loc && !creatureInfo->Name[loc].empty() && Utf8FitTo(creatureInfo->Name[loc], {}))
+                    creatureName = creatureInfo->Name[loc];
+            }
+
+            NpcBotExtras const* extData = ASSERT_NOTNULL(BotDataMgr::SelectNpcBotExtras(creatureId));
+            NpcBotAppearanceData const* appData = BotDataMgr::SelectNpcBotAppearance(creatureId);
+
+            WorldPacket bpdata(SMSG_NAME_QUERY_RESPONSE, (8+1+1+1+1+1+10));
+            bpdata << guid.WriteAsPacked();
+            bpdata << uint8(0);
+            bpdata << creatureName;
+            bpdata << uint8(0);
+            bpdata << uint8(BotMgr::GetBotPlayerRace(extData->bclass, extData->race));
+            bpdata << uint8(appData ? appData->gender : uint8(GENDER_MALE));
+            bpdata << uint8(BotMgr::GetBotPlayerClass(extData->bclass));
+            bpdata << uint8(0);
+            SendPacket(&bpdata);
+            return;
+        }
+    }
+    //end npcbot
+
     Player* player = ObjectAccessor::FindConnectedPlayer(guid);
     CharacterCacheEntry const* nameData = sCharacterCache->GetCharacterCacheByGuid(guid);
 
@@ -70,7 +111,7 @@ void WorldSession::HandleNameQueryOpcode(WorldPacket& recvData)
     recvData >> guid;
 
     // This is disable by default to prevent lots of console spam
-    // TC_LOG_INFO("network", "HandleNameQueryOpcode %u", guid);
+    // TC_LOG_INFO("network", "HandleNameQueryOpcode {}", guid);
 
     SendNameQueryOpcode(guid);
 }
@@ -93,7 +134,7 @@ void WorldSession::HandleCreatureQueryOpcode(WorldPackets::Query::QueryCreature&
 {
     if (CreatureTemplate const* ci = sObjectMgr->GetCreatureTemplate(query.CreatureID))
     {
-        TC_LOG_DEBUG("network", "WORLD: CMSG_CREATURE_QUERY '%s' - Entry: %u.", ci->Name.c_str(), query.CreatureID);
+        TC_LOG_DEBUG("network", "WORLD: CMSG_CREATURE_QUERY '{}' - Entry: {}.", ci->Name, query.CreatureID);
         if (sWorld->getBoolConfig(CONFIG_CACHE_DATA_QUERIES))
             SendPacket(&ci->QueryData[static_cast<uint32>(GetSessionDbLocaleIndex())]);
         else
@@ -105,8 +146,8 @@ void WorldSession::HandleCreatureQueryOpcode(WorldPackets::Query::QueryCreature&
     }
     else
     {
-        TC_LOG_DEBUG("network", "WORLD: CMSG_CREATURE_QUERY - NO CREATURE INFO! (%s, ENTRY: %u)",
-            query.Guid.ToString().c_str(), query.CreatureID);
+        TC_LOG_DEBUG("network", "WORLD: CMSG_CREATURE_QUERY - NO CREATURE INFO! ({}, ENTRY: {})",
+            query.Guid.ToString(), query.CreatureID);
 
         WorldPackets::Query::QueryCreatureResponse response;
         response.CreatureID = query.CreatureID;
@@ -131,8 +172,8 @@ void WorldSession::HandleGameObjectQueryOpcode(WorldPackets::Query::QueryGameObj
     }
     else
     {
-        TC_LOG_DEBUG("network", "WORLD: CMSG_GAMEOBJECT_QUERY - Missing gameobject info for (%s, ENTRY: %u)",
-            query.Guid.ToString().c_str(), query.GameObjectID);
+        TC_LOG_DEBUG("network", "WORLD: CMSG_GAMEOBJECT_QUERY - Missing gameobject info for ({}, ENTRY: {})",
+            query.Guid.ToString(), query.GameObjectID);
 
         WorldPackets::Query::QueryGameObjectResponse response;
         response.GameObjectID = query.GameObjectID;
@@ -141,13 +182,13 @@ void WorldSession::HandleGameObjectQueryOpcode(WorldPackets::Query::QueryGameObj
     }
 }
 
-void WorldSession::HandleCorpseQueryOpcode(WorldPacket & /*recvData*/)
+void WorldSession::HandleQueryCorpseLocation(WorldPackets::Query::QueryCorpseLocationFromClient& /*queryCorpseLocation*/)
 {
     if (!_player->HasCorpse())
     {
-        WorldPacket data(MSG_CORPSE_QUERY, 1);
-        data << uint8(0);                                   // corpse not found
-        SendPacket(&data);
+        WorldPackets::Query::CorpseLocation packet;
+        packet.Valid = false;                               // corpse not found
+        SendPacket(packet.Write());
         return;
     }
 
@@ -178,15 +219,13 @@ void WorldSession::HandleCorpseQueryOpcode(WorldPacket & /*recvData*/)
         }
     }
 
-    WorldPacket data(MSG_CORPSE_QUERY, 1+(6*4));
-    data << uint8(1);                                       // corpse found
-    data << int32(mapID);
-    data << float(x);
-    data << float(y);
-    data << float(z);
-    data << int32(corpseMapID);
-    data << uint32(0);                                      // unknown
-    SendPacket(&data);
+    WorldPackets::Query::CorpseLocation packet;
+    packet.Valid = true;
+    packet.MapID = corpseMapID;
+    packet.ActualMapID = mapID;
+    packet.Position = Position(x, y, z);
+    packet.Transport = 0;                   // TODO: If corpse is on transport, send transport offsets and transport guid
+    SendPacket(packet.Write());
 }
 
 void WorldSession::HandleNpcTextQueryOpcode(WorldPacket& recvData)
@@ -195,7 +234,7 @@ void WorldSession::HandleNpcTextQueryOpcode(WorldPacket& recvData)
     uint64 guid;
 
     recvData >> textID;
-    TC_LOG_DEBUG("network", "WORLD: CMSG_NPC_TEXT_QUERY TextId: %u", textID);
+    TC_LOG_DEBUG("network", "WORLD: CMSG_NPC_TEXT_QUERY TextId: {}", textID);
 
     recvData >> guid;
 
@@ -314,19 +353,22 @@ void WorldSession::HandleQueryPageText(WorldPacket& recvData)
     }
 }
 
-void WorldSession::HandleCorpseMapPositionQuery(WorldPacket& recvData)
+void WorldSession::HandleQueryCorpseTransport(WorldPackets::Query::QueryCorpseTransport& queryCorpseTransport)
 {
-    TC_LOG_DEBUG("network", "WORLD: Recv CMSG_CORPSE_MAP_POSITION_QUERY");
+    WorldPackets::Query::CorpseTransportQuery response;
+    if (Corpse const* corpse = _player->GetCorpse())
+    {
+        if (Transport const* transport = corpse->GetTransport())
+        {
+            if (transport->GetGUID().GetCounter() == queryCorpseTransport.Transport)
+            {
+                response.Position = transport->GetPosition();
+                response.Facing = transport->GetOrientation();
+            }
+        }
+    }
 
-    uint32 unk;
-    recvData >> unk;
-
-    WorldPacket data(SMSG_CORPSE_MAP_POSITION_QUERY_RESPONSE, 4+4+4+4);
-    data << float(0);
-    data << float(0);
-    data << float(0);
-    data << float(0);
-    SendPacket(&data);
+    SendPacket(response.Write());
 }
 
 void WorldSession::HandleQuestPOIQuery(WorldPackets::Query::QuestPOIQuery& query)

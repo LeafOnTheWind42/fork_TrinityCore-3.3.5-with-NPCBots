@@ -204,17 +204,20 @@ enum CreatureFlagsExtra : uint32
     CREATURE_FLAG_EXTRA_UNUSED_23            = 0x00800000,
     CREATURE_FLAG_EXTRA_UNUSED_24            = 0x01000000,
     CREATURE_FLAG_EXTRA_UNUSED_25            = 0x02000000,
-    CREATURE_FLAG_EXTRA_NPCBOT               = 0x04000000,       // custom flag for NPCBots (not confirmed safe)
-    CREATURE_FLAG_EXTRA_NPCBOT_PET           = 0x08000000,       // custom flag for NPCBot pets (not confirmed safe)
+    CREATURE_FLAG_EXTRA_UNUSED_26            = 0x04000000,
+    CREATURE_FLAG_EXTRA_UNUSED_27            = 0x08000000,
     CREATURE_FLAG_EXTRA_DUNGEON_BOSS         = 0x10000000,       // creature is a dungeon boss (SET DYNAMICALLY, DO NOT ADD IN DB)
     CREATURE_FLAG_EXTRA_IGNORE_PATHFINDING   = 0x20000000,       // creature ignore pathfinding
     CREATURE_FLAG_EXTRA_IMMUNITY_KNOCKBACK   = 0x40000000,       // creature is immune to knockback effects
     CREATURE_FLAG_EXTRA_UNUSED_31            = 0x80000000,
 
     // Masks
-    CREATURE_FLAG_EXTRA_UNUSED               = (CREATURE_FLAG_EXTRA_UNUSED_22 |
-                                                CREATURE_FLAG_EXTRA_UNUSED_23 | CREATURE_FLAG_EXTRA_UNUSED_24 | CREATURE_FLAG_EXTRA_UNUSED_25 |
-                                                CREATURE_FLAG_EXTRA_UNUSED_31), // SKIP
+    //npcbot
+    CREATURE_FLAG_EXTRA_NPCBOT               = (CREATURE_FLAG_EXTRA_UNUSED_31 | CREATURE_FLAG_EXTRA_UNUSED_25 | CREATURE_FLAG_EXTRA_UNUSED_26 | CREATURE_FLAG_EXTRA_UNUSED_27),
+    CREATURE_FLAG_EXTRA_NPCBOT_PET           = (CREATURE_FLAG_EXTRA_UNUSED_31 | CREATURE_FLAG_EXTRA_UNUSED_25 | CREATURE_FLAG_EXTRA_UNUSED_27),
+    //end npcbot
+
+    CREATURE_FLAG_EXTRA_UNUSED               = (CREATURE_FLAG_EXTRA_UNUSED_22 | CREATURE_FLAG_EXTRA_UNUSED_23 | CREATURE_FLAG_EXTRA_UNUSED_24), // SKIP
 
     CREATURE_FLAG_EXTRA_DB_ALLOWED           = (0xFFFFFFFF & ~(CREATURE_FLAG_EXTRA_UNUSED | CREATURE_FLAG_EXTRA_DUNGEON_BOSS)) // SKIP
 };
@@ -349,6 +352,7 @@ struct TC_GAME_API CreatureTemplate
     uint32  SpellSchoolImmuneMask;
     uint32  flags_extra;
     uint32  ScriptID;
+    std::string StringId;
     WorldPacket QueryData[TOTAL_LOCALES];
     uint32  GetRandomValidModelId() const;
     uint32  GetFirstValidModelId() const;
@@ -356,6 +360,21 @@ struct TC_GAME_API CreatureTemplate
     uint32  GetFirstVisibleModel() const;
 
     // helpers
+    //npcbot
+    inline bool IsNPCBot() const
+    {
+        return (flags_extra & CREATURE_FLAG_EXTRA_NPCBOT) == CREATURE_FLAG_EXTRA_NPCBOT;
+    }
+    inline bool IsNPCBotPet() const
+    {
+        return (flags_extra & CREATURE_FLAG_EXTRA_NPCBOT) == CREATURE_FLAG_EXTRA_NPCBOT_PET;
+    }
+    inline bool IsNPCBotOrPet() const
+    {
+        return IsNPCBot() || IsNPCBotPet();
+    }
+    //end npcbot
+
     SkillType GetRequiredLootSkill() const
     {
         if (type_flags & CREATURE_TYPE_FLAG_SKIN_WITH_HERBALISM)
@@ -402,7 +421,7 @@ struct TC_GAME_API CreatureBaseStats
 
     uint32 GenerateHealth(CreatureTemplate const* info) const
     {
-        return uint32(ceil(BaseHealth[info->expansion] * info->ModHealth));
+        return uint32(std::round(std::max(BaseHealth[info->expansion] * info->ModHealth, 1.0f)));
     }
 
     uint32 GenerateMana(CreatureTemplate const* info) const
@@ -479,8 +498,11 @@ struct CreatureAddon
 {
     uint32 path_id;
     uint32 mount;
-    uint32 bytes1;
-    uint32 bytes2;
+    uint8 standState;
+    uint8 animTier;
+    uint8 sheathState;
+    uint8 pvpFlags;
+    uint8 visFlags;
     uint32 emote;
     std::vector<uint32> auras;
     VisibilityDistanceType visibilityDistanceType;

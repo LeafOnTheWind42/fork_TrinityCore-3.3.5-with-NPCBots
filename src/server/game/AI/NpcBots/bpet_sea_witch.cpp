@@ -1,6 +1,7 @@
 #include "bot_ai.h"
 #include "botspell.h"
 #include "bpet_ai.h"
+#include "Containers.h"
 #include "MotionMaster.h"
 #include "ScriptMgr.h"
 #include "SpellAuras.h"
@@ -51,7 +52,7 @@ public:
         void KilledUnit(Unit* u) override { bot_pet_ai::KilledUnit(u); }
         void EnterEvadeMode(EvadeReason why = EVADE_REASON_OTHER) override { bot_pet_ai::EnterEvadeMode(why); }
         void MoveInLineOfSight(Unit* u) override { bot_pet_ai::MoveInLineOfSight(u); }
-        void JustDied(Unit* u) override { canUpdate = false; me->ToTempSummon()->UnSummon(1); bot_pet_ai::JustDied(u); }
+        void JustDied(Unit* u) override { bot_pet_ai::JustDied(u); }
 
         void DoPetActions(uint32 diff)
         {
@@ -61,7 +62,7 @@ public:
                 std::list<Unit*> targets;
                 petOwner->GetBotAI()->HelpGetNearbyTargetsList(targets, 10.f, 1, me);
                 if (targets.size() > 2)
-                    Trinity::Containers::RandomResize(targets, 2);
+                    Bcore::Containers::RandomResize(targets, 2);
                 for (Unit* u : targets)
                     me->CastSpell(u, GetSpell(ENVELOP_1), true);
                 SetSpellCooldown(ENVELOP_1, 3000);
@@ -91,7 +92,7 @@ public:
                 me->ToTempSummon()->UnSummon(1);
                 return;
             }
-            else if (!me->IsOutdoors() && (indoorsTimer += diff) >= TORNADO_DISSIPATE_TIMER)
+            else if ((IsIndoors() && !me->IsOutdoors()) && (isIndoorsTimer += diff) >= TORNADO_DISSIPATE_TIMER)
             {
                 canUpdate = false;
                 me->SetObjectScale(me->GetNativeObjectScale() / 2.f);
@@ -221,7 +222,7 @@ public:
             liveTimer = 0;
             moveResetTimer = 0;
             growthTimer = 0;
-            indoorsTimer = 0;
+            isIndoorsTimer = 0;
         }
 
         void InitPetSpells() override
@@ -240,7 +241,7 @@ public:
         uint32 liveTimer;
         uint32 moveResetTimer;
         uint32 growthTimer;
-        uint32 indoorsTimer;
+        uint32 isIndoorsTimer;
     };
 };
 

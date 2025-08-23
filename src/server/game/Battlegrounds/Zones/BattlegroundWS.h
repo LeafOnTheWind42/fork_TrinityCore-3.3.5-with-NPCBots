@@ -186,10 +186,10 @@ struct BattlegroundWGScore final : public BattlegroundScore
             }
         }
 
-        void BuildObjectivesBlock(WorldPacket& data) final override;
+        void BuildObjectivesBlock(WorldPackets::Battleground::PVPLogData_Player& playerData) override;
 
-        uint32 GetAttr1() const final override { return FlagCaptures; }
-        uint32 GetAttr2() const final override { return FlagReturns; }
+        uint32 GetAttr1() const override { return FlagCaptures; }
+        uint32 GetAttr2() const override { return FlagReturns; }
 
         uint32 FlagCaptures;
         uint32 FlagReturns;
@@ -235,6 +235,20 @@ class BattlegroundWS : public Battleground
         void Reset() override;
         void EndBattleground(uint32 winner) override;
         WorldSafeLocsEntry const* GetClosestGraveyard(Player* player) override;
+
+        //npcbot
+        WorldSafeLocsEntry const* GetClosestGraveyardForBot(WorldLocation const& curPos, uint32 team) const override;
+        void AddBot(Creature* bot) override;
+        void RemoveBot(ObjectGuid guid) override;
+        bool UpdateBotScore(Creature const* bot, uint32 type, uint32 value, bool doAddHonor = true) override;
+        void HandleBotKillPlayer(Creature* bot, Player* victim) override;
+        void HandleBotKillBot(Creature* bot, Creature* victim) override;
+        void HandlePlayerKillBot(Creature* bot, Player* killer) override;
+        void EventBotDroppedFlag(Creature* bot) override;
+        void EventBotClickedOnFlag(Creature* bot, GameObject* target_obj) override;
+        void HandleBotAreaTrigger(Creature* bot, uint32 trigger) override;
+        void EventBotCapturedFlag(Creature* bot);
+        //end npcbot
 
         void UpdateFlagState(uint32 team, uint32 value);
         void SetLastFlagCapture(uint32 team)                { _lastFlagCaptureTeam = team; }

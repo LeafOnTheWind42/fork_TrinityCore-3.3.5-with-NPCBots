@@ -24,6 +24,7 @@
 #include "Loot.h"
 #include "SharedDefines.h"
 #include "Timer.h"
+#include "UniqueTrackablePtr.h"
 #include <map>
 
 class Battlefield;
@@ -39,10 +40,11 @@ class WorldSession;
 
 struct MapEntry;
 
-#define MAXGROUPSIZE 5
-#define MAXRAIDSIZE 40
-#define MAX_RAID_SUBGROUPS MAXRAIDSIZE/MAXGROUPSIZE
-#define TARGETICONCOUNT 8
+#define MAX_GROUP_SIZE      5
+#define MAX_RAID_SIZE       40
+#define MAX_RAID_SUBGROUPS  MAX_RAID_SIZE / MAX_GROUP_SIZE
+
+#define TARGET_ICONS_COUNT  8
 
 enum RollVote
 {
@@ -190,6 +192,16 @@ class TC_GAME_API Group
         bool Create(Player* leader);
         void LoadGroupFromDB(Field* field);
         void LoadMemberFromDB(ObjectGuid::LowType guidLow, uint8 memberFlags, uint8 subgroup, uint8 roles);
+        //npcbot
+        bool Create(Creature* leader);
+        bool AddMember(Creature* creature);
+        void LoadCreatureMemberFromDB(uint32 entry, uint8 memberFlags, uint8 subgroup, uint8 roles);
+        void UpdateBotOutOfRange(Creature* creature);
+        void LinkBotMember(GroupBotReference* bRef);
+        void DelinkBotMember(ObjectGuid guid);
+        GroupBotReference* GetFirstBotMember() { return m_botMemberMgr.getFirst(); }
+        GroupBotReference const* GetFirstBotMember() const { return m_botMemberMgr.getFirst(); }
+        //end npcbot
         bool AddInvite(Player* player);
         void RemoveInvite(Player* player);
         void RemoveAllInvites();
@@ -255,7 +267,7 @@ class TC_GAME_API Group
 
         void SetBattlegroundGroup(Battleground* bg);
         void SetBattlefieldGroup(Battlefield* bf);
-        GroupJoinBattlegroundResult CanJoinBattlegroundQueue(Battleground const* bgOrTemplate, BattlegroundQueueTypeId bgQueueTypeId, uint32 MinPlayerCount, uint32 MaxPlayerCount, bool isRated, uint32 arenaSlot);
+        GroupJoinBattlegroundResult CanJoinBattlegroundQueue(Battleground const* bgOrTemplate, BattlegroundQueueTypeId bgQueueTypeId, uint32 MinPlayerCount, uint32 MaxPlayerCount, bool isRated, uint32 arenaSlot, ObjectGuid& errorGuid) const;
 
         void ChangeMembersGroup(ObjectGuid guid, uint8 group);
         void SetTargetIcon(uint8 id, ObjectGuid whoGuid, ObjectGuid targetGuid);
@@ -275,7 +287,8 @@ class TC_GAME_API Group
         //void SendInit(WorldSession* session);
         void SendTargetIconList(WorldSession* session);
         void SendUpdate();
-        void SendUpdateToPlayer(ObjectGuid playerGUID, MemberSlot* slot = nullptr);
+        void SendUpdateToPlayer(Player const* player, MemberSlot const* slot = nullptr);
+        void SendOriginalGroupUpdateToPlayer(Player const* player) const;
         void UpdatePlayerOutOfRange(Player* player);
 
         template<class Worker>
@@ -312,7 +325,7 @@ class TC_GAME_API Group
         void MasterLoot(Loot* loot, WorldObject* pLootedObject);
         Rolls::iterator GetRoll(ObjectGuid Guid);
         void CountTheRoll(Rolls::iterator roll, Map* allowedMap);
-        void CountRollVote(ObjectGuid playerGUID, ObjectGuid Guid, uint8 Choise);
+        bool CountRollVote(ObjectGuid playerGUID, ObjectGuid Guid, uint8 Choise);
         void EndRoll(Loot* loot, Map* allowedMap);
 
         // related to disenchant rolls
@@ -340,6 +353,8 @@ class TC_GAME_API Group
         ObjectGuid const* GetTargetIcons() const { return m_targetIcons; }
         //end npcbots
 
+        Trinity::unique_weak_ptr<Group> GetWeakPtr() const { return m_scriptRef; }
+
     protected:
         bool _setMembersGroup(ObjectGuid guid, uint8 group);
         void _homebindIfInstance(Player* player);
@@ -353,6 +368,9 @@ class TC_GAME_API Group
 
         MemberSlotList      m_memberSlots;
         GroupRefManager     m_memberMgr;
+        //npcbot
+        GroupBotRefManager  m_botMemberMgr;
+        //end npcbot
         InvitesList         m_invitees;
         ObjectGuid          m_leaderGuid;
         std::string         m_leaderName;
@@ -361,7 +379,7 @@ class TC_GAME_API Group
         Difficulty          m_raidDifficulty;
         Battleground*       m_bgGroup;
         Battlefield*        m_bfGroup;
-        ObjectGuid          m_targetIcons[TARGETICONCOUNT];
+        ObjectGuid          m_targetIcons[TARGET_ICONS_COUNT];
         LootMethod          m_lootMethod;
         ItemQualities       m_lootThreshold;
         ObjectGuid          m_looterGuid;
@@ -375,5 +393,8 @@ class TC_GAME_API Group
         uint32              m_dbStoreId;                    // Represents the ID used in database (Can be reused by other groups if group was disbanded)
         bool                m_isLeaderOffline;
         TimeTracker         m_leaderOfflineTimer;
+
+        struct NoopGroupDeleter { void operator()(Group*) const { /*noop - not managed*/ } };
+        Trinity::unique_trackable_ptr<Group> m_scriptRef;
 };
 #endif

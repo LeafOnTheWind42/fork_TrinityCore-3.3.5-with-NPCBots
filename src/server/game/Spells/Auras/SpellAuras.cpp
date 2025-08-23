@@ -38,6 +38,10 @@
 #include "World.h"
 #include "WorldPacket.h"
 
+//npcbot
+#include "botspell.h"
+//end npcbot
+
 AuraCreateInfo::AuraCreateInfo(SpellInfo const* spellInfo, uint8 auraEffMask, WorldObject* owner) :
     _spellInfo(spellInfo), _auraEffectMask(auraEffMask), _owner(owner)
 {
@@ -85,10 +89,10 @@ _flags(AFLAG_NONE), _effectsToApply(effMask), _needClientUpdate(false)
             _slot = slot;
             GetTarget()->SetVisibleAura(slot, this);
             SetNeedClientUpdate();
-            TC_LOG_DEBUG("spells", "Aura: %u Effect: %d put to unit visible auras slot: %u", GetBase()->GetId(), GetEffectMask(), slot);
+            TC_LOG_DEBUG("spells", "Aura: {} Effect: {} put to unit visible auras slot: {}", GetBase()->GetId(), GetEffectMask(), slot);
         }
         else
-            TC_LOG_ERROR("spells", "Aura: %u Effect: %d could not find empty unit visible slot", GetBase()->GetId(), GetEffectMask());
+            TC_LOG_ERROR("spells", "Aura: {} Effect: {} could not find empty unit visible slot", GetBase()->GetId(), GetEffectMask());
     }
 
     _InitFlags(caster, effMask);
@@ -167,7 +171,7 @@ void AuraApplication::_HandleEffect(uint8 effIndex, bool apply)
     ASSERT(aurEff);
     ASSERT(HasEffect(effIndex) == (!apply));
     ASSERT((1<<effIndex) & _effectsToApply);
-    TC_LOG_DEBUG("spells", "AuraApplication::_HandleEffect: %u, apply: %u: amount: %u", aurEff->GetAuraType(), apply, aurEff->GetAmount());
+    TC_LOG_DEBUG("spells", "AuraApplication::_HandleEffect: {}, apply: {}: amount: {}", aurEff->GetAuraType(), apply, aurEff->GetAmount());
 
     if (apply)
     {
@@ -374,10 +378,10 @@ Aura* Aura::Create(AuraCreateInfo& createInfo)
         createInfo.CasterGUID = createInfo.Caster->GetGUID();
 
     // check if aura can be owned by owner
-    if (createInfo._owner->isType(TYPEMASK_UNIT))
-        if (!createInfo._owner->IsInWorld() || createInfo._owner->ToUnit()->IsDuringRemoveFromWorld())
+    if (Unit* ownerUnit = createInfo._owner->ToUnit())
+        if (!ownerUnit->IsInWorld() || ownerUnit->IsDuringRemoveFromWorld())
             // owner not in world so don't allow to own not self cast single target auras
-            if (createInfo.CasterGUID != createInfo._owner->GetGUID() && createInfo._spellInfo->IsSingleTarget())
+            if (createInfo.CasterGUID != ownerUnit->GetGUID() && createInfo._spellInfo->IsSingleTarget())
                 return nullptr;
 
     Aura* aura = nullptr;
@@ -428,7 +432,7 @@ m_castItemGuid(createInfo.CastItemGUID), m_applyTime(GameTime::GetGameTime()),
 m_owner(createInfo._owner), m_timeCla(0), m_updateTargetMapInterval(0),
 _casterInfo(), m_procCharges(0), m_stackAmount(1),
 m_isRemoved(false), m_isSingleTarget(false), m_isUsingCharges(false), m_dropEvent(nullptr),
-m_procCooldown(TimePoint::min())
+m_procCooldown(TimePoint::min()), m_scriptRef(this, NoopAuraDeleter())
 {
     if (m_spellInfo->ManaPerSecond || m_spellInfo->ManaPerSecondPerLevel)
         m_timeCla = 1 * IN_MILLISECONDS;
@@ -469,10 +473,6 @@ bool Aura::CanPeriodicTickCrit(Unit const* caster) const
 {
     if (GetSpellInfo()->HasAttribute(SPELL_ATTR2_CANT_CRIT))
         return false;
-
-    // need to check this attribute because it's the triggered spell that'll receive the crit chance
-    if (GetSpellInfo()->HasAttribute(SPELL_ATTR4_INHERIT_CRIT_FROM_AURA))
-        return true;
 
     if (caster->HasAuraTypeWithAffectMask(SPELL_AURA_ABILITY_PERIODIC_CRIT, GetSpellInfo()))
         return true;
@@ -573,7 +573,7 @@ void Aura::_ApplyForTarget(Unit* target, Unit* caster, AuraApplication* auraApp)
         }
     }
     //npcbot: infinity cd for bots
-    if (caster && m_spellInfo->IsCooldownStartedOnEvent() && caster->GetTypeId() == TYPEID_UNIT && caster->ToCreature()->IsNPCBot())
+    if (caster && m_spellInfo->IsCooldownStartedOnEvent() && caster->IsNPCBot())
         caster->ToCreature()->AddBotSpellCooldown(m_spellInfo->Id, std::numeric_limits<uint32>::max());
     //end npcbot
 }
@@ -589,8 +589,8 @@ void Aura::_UnapplyForTarget(Unit* target, Unit* caster, AuraApplication* auraAp
     /// @todo Figure out why this happens
     if (itr == m_applications.end())
     {
-        TC_LOG_ERROR("spells", "Aura::_UnapplyForTarget, target: %s, caster: %s, spell:%u was not found in owners application map!",
-        target->GetGUID().ToString().c_str(), caster ? caster->GetGUID().ToString().c_str() : "0", auraApp->GetBase()->GetSpellInfo()->Id);
+        TC_LOG_ERROR("spells", "Aura::_UnapplyForTarget, target: {}, caster: {}, spell:{} was not found in owners application map!",
+        target->GetGUID().ToString(), caster ? caster->GetGUID().ToString() : "0", auraApp->GetBase()->GetSpellInfo()->Id);
         ABORT();
     }
 
@@ -606,7 +606,7 @@ void Aura::_UnapplyForTarget(Unit* target, Unit* caster, AuraApplication* auraAp
         caster->GetSpellHistory()->SendCooldownEvent(GetSpellInfo());
 
     //npcbot: release cd state for bots
-    if (caster && m_spellInfo->IsCooldownStartedOnEvent() && caster->GetTypeId() == TYPEID_UNIT && caster->ToCreature()->IsNPCBot())
+    if (caster && m_spellInfo->IsCooldownStartedOnEvent() && caster->IsNPCBot())
         caster->ToCreature()->ReleaseBotSpellCooldown(m_spellInfo->Id);
     //end npcbot
 }
@@ -631,6 +631,8 @@ void Aura::_Remove(AuraRemoveMode removeMode)
         m_dropEvent->ScheduleAbort();
         m_dropEvent = nullptr;
     }
+
+    m_scriptRef = nullptr;
 }
 
 void Aura::UpdateTargetMap(Unit* caster, bool apply)
@@ -730,9 +732,9 @@ void Aura::UpdateTargetMap(Unit* caster, bool apply)
             if (!GetOwner()->IsSelfOrInSameMap(itr->first))
             {
                 /// @todo There is a crash caused by shadowfiend load addon
-                TC_LOG_FATAL("spells", "Aura %u: Owner %s (map %u) is not in the same map as target %s (map %u).", GetSpellInfo()->Id,
-                    GetOwner()->GetName().c_str(), GetOwner()->IsInWorld() ? GetOwner()->GetMap()->GetId() : uint32(-1),
-                    itr->first->GetName().c_str(), itr->first->IsInWorld() ? itr->first->GetMap()->GetId() : uint32(-1));
+                TC_LOG_FATAL("spells", "Aura {}: Owner {} (map {}) is not in the same map as target {} (map {}).", GetSpellInfo()->Id,
+                    GetOwner()->GetName(), GetOwner()->IsInWorld() ? GetOwner()->GetMap()->GetId() : uint32(-1),
+                    itr->first->GetName(), itr->first->IsInWorld() ? itr->first->GetMap()->GetId() : uint32(-1));
                 ABORT();
             }
 
@@ -958,11 +960,19 @@ uint8 Aura::CalcMaxCharges(Unit* caster) const
     if (SpellProcEntry const* procEntry = sSpellMgr->GetSpellProcEntry(GetId()))
         maxProcCharges = procEntry->Charges;
 
+    //npcbot: override spell proc
+    if (caster && caster->IsNPCBot())
+    {
+        if (SpellProcEntry const* procOverride = GetBotSpellProceEntryOverride(GetId()))
+            maxProcCharges = procOverride->Charges;
+    }
+    //end npcbot
+
     if (caster)
         if (Player* modOwner = caster->GetSpellModOwner())
             modOwner->ApplySpellMod(GetId(), SPELLMOD_CHARGES, maxProcCharges);
 
-    return maxProcCharges;
+    return uint8(maxProcCharges);
 }
 
 bool Aura::ModCharges(int32 num, AuraRemoveMode removeMode)
@@ -1509,7 +1519,7 @@ void Aura::HandleAuraSpecificMods(AuraApplication const* aurApp, Unit* caster, b
                             case 49631: spellId = 50509; break;
                             case 49032: spellId = 50508; break;
                             default:
-                                TC_LOG_ERROR("spells", "Aura::HandleAuraSpecificMods: Unknown rank of Crypt Fever/Ebon Plague (%d) found", aurEff->GetId());
+                                TC_LOG_ERROR("spells", "Aura::HandleAuraSpecificMods: Unknown rank of Crypt Fever/Ebon Plague ({}) found", aurEff->GetId());
                         }
                         caster->CastSpell(target, spellId, GetEffect(0));
                     }
@@ -1583,7 +1593,7 @@ void Aura::HandleAuraSpecificMods(AuraApplication const* aurApp, Unit* caster, b
                             case 53759: spellId = 60947; break;
                             case 53754: spellId = 60946; break;
                             default:
-                                TC_LOG_ERROR("spells", "Aura::HandleAuraSpecificMods: Unknown rank of Improved Fear (%d) found", aurEff->GetId());
+                                TC_LOG_ERROR("spells", "Aura::HandleAuraSpecificMods: Unknown rank of Improved Fear ({}) found", aurEff->GetId());
                         }
                         if (spellId)
                             caster->CastSpell(target, spellId, true);
@@ -2008,6 +2018,16 @@ void Aura::PrepareProcToTrigger(AuraApplication* aurApp, ProcEventInfo& eventInf
     }
 
     SpellProcEntry const* procEntry = sSpellMgr->GetSpellProcEntry(GetId());
+
+    //npcbot: override spell proc
+    Unit const* caster = aurApp && aurApp->GetBase()->GetCasterGUID().IsCreature() ? aurApp->GetBase()->GetCaster() : nullptr;
+    if (caster && caster->IsNPCBot())
+    {
+        if (SpellProcEntry const* procOverride = GetBotSpellProceEntryOverride(GetId()))
+            procEntry = procOverride;
+    }
+    //end npcbot
+
     ASSERT(procEntry);
 
     // cooldowns should be added to the whole aura (see 51698 area aura)
@@ -2017,6 +2037,16 @@ void Aura::PrepareProcToTrigger(AuraApplication* aurApp, ProcEventInfo& eventInf
 uint8 Aura::GetProcEffectMask(AuraApplication* aurApp, ProcEventInfo& eventInfo, TimePoint now) const
 {
     SpellProcEntry const* procEntry = sSpellMgr->GetSpellProcEntry(GetId());
+
+    //npcbot: override spell proc
+    Unit const* caster = aurApp && aurApp->GetBase()->GetCasterGUID().IsCreature() ? aurApp->GetBase()->GetCaster() : nullptr;
+    if (caster && caster->IsNPCBot())
+    {
+        if (SpellProcEntry const* procOverride = GetBotSpellProceEntryOverride(GetId()))
+            procEntry = procOverride;
+    }
+    //end npcbot
+
     // only auras with spell proc entry can trigger proc
     if (!procEntry)
         return 0;
@@ -2029,8 +2059,8 @@ uint8 Aura::GetProcEffectMask(AuraApplication* aurApp, ProcEventInfo& eventInfo,
             return 0;
 
         // check if aura can proc when spell is triggered (exception for hunter auto shot & wands)
-        if (spell->IsTriggered() && !(procEntry->AttributesMask & PROC_ATTR_TRIGGERED_CAN_PROC) && !(eventInfo.GetTypeMask() & AUTO_ATTACK_PROC_FLAG_MASK))
-            if (!GetSpellInfo()->HasAttribute(SPELL_ATTR3_CAN_PROC_WITH_TRIGGERED))
+        if (!GetSpellInfo()->HasAttribute(SPELL_ATTR3_CAN_PROC_FROM_PROCS) && !(procEntry->AttributesMask & PROC_ATTR_TRIGGERED_CAN_PROC) && !(eventInfo.GetTypeMask() & AUTO_ATTACK_PROC_FLAG_MASK))
+            if (spell->IsTriggered() && !spell->GetSpellInfo()->HasAttribute(SPELL_ATTR3_NOT_A_PROC))
                 return 0;
 
         if (spell->m_CastItem && (procEntry->AttributesMask & PROC_ATTR_CANT_PROC_FROM_ITEM_CAST))
@@ -2197,7 +2227,7 @@ void Aura::LoadScripts()
     sScriptMgr->CreateAuraScripts(m_spellInfo->Id, m_loadedScripts, this);
     for (auto itr = m_loadedScripts.begin(); itr != m_loadedScripts.end(); ++itr)
     {
-        TC_LOG_DEBUG("spells", "Aura::LoadScripts: Script `%s` for aura `%u` is loaded now", (*itr)->_GetScriptName()->c_str(), m_spellInfo->Id);
+        TC_LOG_DEBUG("spells", "Aura::LoadScripts: Script `{}` for aura `{}` is loaded now", (*itr)->_GetScriptName()->c_str(), m_spellInfo->Id);
         (*itr)->Register();
     }
 }
@@ -2620,6 +2650,9 @@ void UnitAura::Remove(AuraRemoveMode removeMode)
 
 void UnitAura::FillTargetMap(std::unordered_map<Unit*, uint8>& targets, Unit* caster)
 {
+    if (GetSpellInfo()->HasAttribute(SPELL_ATTR7_DISABLE_AURA_WHILE_DEAD) && !GetUnitOwner()->IsAlive())
+        return;
+
     Unit* ref = caster;
     if (!ref)
         ref = GetUnitOwner();

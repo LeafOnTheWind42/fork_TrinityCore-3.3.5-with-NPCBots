@@ -2,6 +2,8 @@
 #include "bot_GridNotifiers.h"
 #include "botmgr.h"
 #include "botspell.h"
+#include "bottraits.h"
+#include "Containers.h"
 #include "Creature.h"
 #include "ScriptMgr.h"
 /*
@@ -171,16 +173,26 @@ public:
             if (!CheckAttackTarget())
                 return;
 
+            CheckUsableItems(diff);
+
             Attack(diff);
         }
 
         void Attack(uint32 diff)
         {
-            StartAttack(opponent, IsMelee());
+            Unit* mytar = opponent ? opponent : disttarget ? disttarget : nullptr;
+            if (!mytar)
+                return;
+
+            StartAttack(mytar, IsMelee());
+
+            CheckAttackState();
+            if (!me->IsAlive() || !mytar->IsAlive())
+                return;
 
             CheckDrainMana(diff);
 
-            MoveBehind(opponent);
+            MoveBehind(mytar);
 
             if (!HasRole(BOT_ROLE_DPS))
                 return;
@@ -188,20 +200,23 @@ public:
             if (GC_Timer > diff)
                 return;
 
-            if (me->GetDistance(opponent) > 20)
+            if (me->GetDistance(mytar) > 30)
                 return;
 
-            if (me->isMoving() && !me->HasInArc(float(M_PI)/2, opponent))
+            if (me->isMoving() && !me->HasInArc(float(M_PI)/2, mytar))
+                return;
+
+            if (!CanAffectVictimAny(mytar, SPELL_SCHOOL_SHADOW, SPELL_SCHOOL_ARCANE))
                 return;
 
             if (me->GetPower(POWER_MANA) >= SPLASH_ATTACK_COST && IsSpellReady(SPLASH_ATTACK_1, diff))
             {
-                if (doCast(opponent, GetSpell(SPLASH_ATTACK_1)))
+                if (doCast(mytar, GetSpell(SPLASH_ATTACK_1)))
                     return;
             }
             else if (IsSpellReady(MAIN_ATTACK_1, diff))
             {
-                if (doCast(opponent, GetSpell(MAIN_ATTACK_1)))
+                if (doCast(mytar, GetSpell(MAIN_ATTACK_1)))
                     return;
             }
         }
@@ -235,7 +250,7 @@ public:
             if (targets.empty())
                 return;
 
-            Unit* target = Trinity::Containers::SelectRandomContainerElement(targets);
+            Unit* target = Bcore::Containers::SelectRandomContainerElement(targets);
             if (doCast(target, GetSpell(DRAIN_MANA_1)))
                 return;
         }
@@ -255,37 +270,16 @@ public:
 
             bool haveHp = false;
             uint8 partycombat = 0, partynocombat = 0;
-            for (GroupReference const* itr = gr->GetFirstMember(); itr != nullptr; itr = itr->next())
+            for (Unit const* member : BotMgr::GetAllGroupMembers(gr))
             {
-                Player const* player = itr->GetSource();
-                if (!player || me->GetMap() != player->FindMap())
-                    continue;
-
-                if (player->IsInCombat())
-                    partycombat++;
-                else if (player->IsAlive())
-                    partynocombat++;
-
-                if (!haveHp && player->IsAlive() && me->GetDistance(player) < 15 &&
-                    GetHealthPCT(player) < 95)
-                    haveHp = true;
-
-                if (!player->HaveBot())
-                    continue;
-
-                BotMap const* map = player->GetBotMgr()->GetBotMap();
-                for (BotMap::const_iterator it = map->begin(); it != map->end(); ++it)
+                if (me->GetMap() == member->FindMap())
                 {
-                    Creature const* bot = it->second;
-                    if (!bot->IsInWorld())
-                        continue;
-
-                    if (bot->IsInCombat())
+                    if (member->IsInCombat())
                         partycombat++;
-                    else if (bot->IsAlive())
+                    else if (member->IsAlive())
                         partynocombat++;
 
-                    if (!haveHp && bot != me && bot->IsAlive() && me->GetDistance(bot) < 15 && GetHealthPCT(bot) < 95)
+                    if (!haveHp && member->IsAlive() && me->GetDistance(member) < 15 && GetHealthPCT(member) < 95)
                         haveHp = true;
                 }
             }
@@ -309,39 +303,17 @@ public:
 
             bool haveMana = false;
             uint8 partycombat = 0, partynocombat = 0;
-            for (GroupReference const* itr = gr->GetFirstMember(); itr != nullptr; itr = itr->next())
+            for (Unit const* member : BotMgr::GetAllGroupMembers(gr))
             {
-                Player const* player = itr->GetSource();
-                if (!player || me->GetMap() != player->FindMap())
-                    continue;
-
-                if (player->IsInCombat())
-                    partycombat++;
-                else if (player->IsAlive())
-                    partynocombat++;
-
-                if (!haveMana && player->IsAlive() && me->GetDistance(player) < 15 &&
-                    GetManaPCT(player) < 95)
-                    haveMana = true;
-
-                if (!player->HaveBot())
-                    continue;
-
-                BotMap const* map = player->GetBotMgr()->GetBotMap();
-                for (BotMap::const_iterator it = map->begin(); it != map->end(); ++it)
+                if (me->GetMap() == member->FindMap())
                 {
-                    Creature const* bot = it->second;
-                    if (!bot->IsInWorld())
-                        continue;
-
-                    if (bot->IsInCombat())
+                    if (member->IsInCombat())
                         partycombat++;
-                    else if (bot->IsAlive())
+                    else if (member->IsAlive())
                         partynocombat++;
 
-                    if (!haveMana && bot->IsInWorld() && bot->IsAlive() && me->GetDistance(bot) < 15 &&
-                        bot->GetBotClass() != BOT_CLASS_SPHYNX &&
-                        GetManaPCT(bot) < 95)
+                    if (!haveMana && member->IsAlive() && me->GetDistance(member) < 15 && GetManaPCT(member) < 95 &&
+                        !(member->IsNPCBot() && member->ToCreature()->GetBotClass() == BOT_CLASS_SPHYNX))
                         haveMana = true;
                 }
             }
@@ -403,9 +375,9 @@ public:
                 me->CastSpell(me, MH_OH_ATTACK_ANIM, true);
 
             if (baseId == REPLENISH_MANA_1)
-                me->SendPlaySpellVisual(425); //arcane cast omni
+                me->SendPlaySpellVisualKit(1, 425); //arcane cast omni
             if (baseId == REPLENISH_HEALTH_1)
-                me->SendPlaySpellVisual(21); //empty cast finish anim
+                me->SendPlaySpellVisualKit(1, 21); //empty cast finish anim
 
             if (baseId == REPLENISH_MANA_1 || baseId == REPLENISH_HEALTH_1)
                 me->SetPower(POWER_MANA, 0);
@@ -427,7 +399,7 @@ public:
             if (spellId == DEVOUR_MAGIC_1 && target->IsSummon() && target->GetUInt32Value(UNIT_CREATED_BY_SPELL) &&
                 !target->IsTotem() && me->GetReactionTo(target) <= REP_NEUTRAL)
             {
-                SpellInfo const* devInfo = sSpellMgr->GetSpellInfo(spellId);
+                SpellInfo const* devInfo = AssertBotSpellInfoOverride(spellId);
                 uint32 damage = std::min<uint32>(target->GetMaxHealth() / 2, me->GetMaxHealth() / 5 + me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC));
                 Unit::DealDamage(me, target, damage, nullptr, SPELL_DIRECT_DAMAGE, devInfo->GetSchoolMask(), devInfo);
                 OnBotDispelDealt(target, 1);
@@ -436,11 +408,11 @@ public:
             if (spellId == DRAIN_MANA_1)
             {
                 me->CastSpell(target, SPELL_DEVOUR_MAGIC_BEAM, true);
-                target->SendPlaySpellVisual(419); //drain impact visual
+                target->SendPlaySpellVisualKit(1, 419); //drain impact visual
             }
             if (spellId == REPLENISH_MANA_1)
                 if (target != me)
-                    target->SendPlaySpellVisual(524/*436*/); //mana gain visual//heal bigger crimson ish
+                    target->SendPlaySpellVisualKit(1, 524/*436*/); //mana gain visual//heal bigger crimson ish
 
             OnSpellHitTarget(target, spell);
         }
@@ -460,7 +432,7 @@ public:
             if (me != dispelled)
             {
                 me->CastSpell(dispelled, SPELL_DEVOUR_MAGIC_BEAM, true);
-                dispelled->SendPlaySpellVisual(357/*317*/); //purge visual
+                dispelled->SendPlaySpellVisualKit(1, 357/*317*/); //purge visual
             }
 
             dispelsDealt += num;

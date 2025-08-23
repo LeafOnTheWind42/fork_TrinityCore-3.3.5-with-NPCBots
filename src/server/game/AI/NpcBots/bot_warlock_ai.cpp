@@ -1,6 +1,8 @@
 #include "bot_ai.h"
 #include "botmgr.h"
 #include "botspell.h"
+#include "bottraits.h"
+#include "Containers.h"
 #include "Group.h"
 #include "Log.h"
 #include "Map.h"
@@ -225,6 +227,8 @@ public:
         {
             _botclass = BOT_CLASS_WARLOCK;
 
+            myPetType = 0;
+
             InitUnitFlags();
         }
 
@@ -239,7 +243,7 @@ public:
         void KilledUnit(Unit* u) override { bot_ai::KilledUnit(u); }
         void EnterEvadeMode(EvadeReason why = EVADE_REASON_OTHER) override { bot_ai::EnterEvadeMode(why); }
         void MoveInLineOfSight(Unit* u) override { bot_ai::MoveInLineOfSight(u); }
-        void JustDied(Unit* u) override { UnsummonAll(); bot_ai::JustDied(u); }
+        void JustDied(Unit* u) override { UnsummonAll(false); bot_ai::JustDied(u); }
         void DoNonCombatActions(uint32 diff)
         {
             if (GC_Timer > diff || me->IsMounted() || IsCasting() || Feasting() || Rand() > 20)
@@ -276,7 +280,7 @@ public:
                     return;
             }
 
-            if (!hasSoulstone && !IAmFree() && GetSpell(CREATE_SOULSTONE_1))
+            if (!hasSoulstone && GetSpell(CREATE_SOULSTONE_1))
             {
                 if (doCast(me, GetSpell(CREATE_SOULSTONE_1)))
                     return;
@@ -289,58 +293,46 @@ public:
                     return;
             }
 
-            //TODO: soulstone on self/bots
             //BUG: players cannot accept this buff if they are below lvl 20 (should be 8)
-            if (!IAmFree() && hasSoulstone && soulstoneTimer <= diff && GetSpell(CREATE_SOULSTONE_1))
+            if (hasSoulstone && soulstoneTimer <= diff && GetSpell(CREATE_SOULSTONE_1))
             {
-                Group const* gr = master->GetGroup();
-                Unit* u = master;
-                if (!gr)
+                std::vector<Unit*> targets;
+
+                if (!IAmFree())
                 {
-                    if (!u->IsAlive() || u->isPossessed() || u->IsCharmed() ||
-                        me->GetDistance(u) > 30 || u->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
-                        u = nullptr;
-                }
-                else
-                {
-                    //check rezzers first
-                    for (GroupReference const* itr = gr->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    std::vector<Unit*> all_members = BotMgr::GetAllGroupMembers(master->GetGroup());
+                    for (uint8 i = 0; i < 3; ++i)
                     {
-                        u = itr->GetSource();
-                        if (!u || u->GetLevel() < 20 || !u->IsAlive() || me->GetMap() != u->FindMap() ||
-                            u->isPossessed() || u->IsCharmed() || me->GetDistance(u) > 30 ||
-                            u->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
-                        {
-                            u = nullptr;
-                            continue;
-                        }
-                        if (u->GetClass() == CLASS_PRIEST || u->GetClass() == CLASS_PALADIN ||
-                            u->GetClass() == CLASS_DRUID || u->GetClass() == CLASS_SHAMAN)
+                        if (i > 0 && !targets.empty())
                             break;
-                    }
-                    if (!u)
-                    {
-                        for (GroupReference const* itr = gr->GetFirstMember(); itr != nullptr; itr = itr->next())
+                        for (Unit* member : all_members)
                         {
-                            u = itr->GetSource();
-                            if (!u || u->GetLevel() < 20 || !u->IsAlive() || me->GetMap() != u->FindMap() ||
-                                u->isPossessed() || u->IsCharmed() || me->GetDistance(u) > 30 ||
-                                u->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
+                            if ((i >= 2 || (i == 0 ? member->IsPlayer() : (member->IsNPCBot() && !GetBG()))) && me->GetMap() == member->FindMap() &&
+                                member->IsAlive() && !member->isPossessed() && !member->IsCharmed() &&
+                                !(member->IsNPCBot() && member->ToCreature()->IsTempBot()) &&
+                                me->GetDistance(member) < 30 && !member->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
                             {
-                                u = nullptr;
-                                continue;
+                                if (i >= 2 || member->GetClass() == CLASS_PRIEST || member->GetClass() == CLASS_PALADIN ||
+                                    member->GetClass() == CLASS_DRUID || member->GetClass() == CLASS_SHAMAN)
+                                {
+                                    targets.push_back(member);
+                                }
                             }
-                            break;
                         }
                     }
                 }
 
-                if (u)
+                if (targets.empty() && master->IsAlive() && !master->isPossessed() && !master->IsCharmed() && !(GetBG() && IsWanderer()) &&
+                    me->GetDistance(master) < 30 && !master->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
+                    targets.push_back(master);
+
+                if (!targets.empty())
                 {
+                    Unit* target = targets.size() == 1 ? targets.front() : Bcore::Containers::SelectRandomContainerElement(targets);
                     SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(CREATE_SOULSTONE_1);
                     uint32 rank = spellInfo->GetRank();
 
-                    while (rank < 7 && u->GetLevel() > spellInfo->SpellLevel && spellInfo->GetNextRankSpell())
+                    while (rank + 1 < std::size(_healthStoneSpells) && target->GetLevel() > spellInfo->SpellLevel && spellInfo->GetNextRankSpell())
                     {
                         spellInfo = spellInfo->GetNextRankSpell();
                         rank = spellInfo->GetRank();
@@ -357,11 +349,11 @@ public:
                         case 27238: spellId = SOULSTONE_RESURRECTION_6; break; //rank 6
                         case 47884: spellId = SOULSTONE_RESURRECTION_7; break; //rank 7
                         default:
-                            TC_LOG_ERROR("entities.player", "bot_warlockAI: unknown soulstone Id %u", spellInfo->Id);
+                            BOT_LOG_ERROR("entities.player", "bot_warlockAI: unknown soulstone Id {}", spellInfo->Id);
                             spellId = SOULSTONE_RESURRECTION_1;
                             break;
                     }
-                    me->CastSpell(u, spellId, false);
+                    me->CastSpell(target, spellId, false);
                 }
             }
         }
@@ -491,7 +483,7 @@ public:
                     return;
             }
             //Howl of Terror (only instant cast)
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                 !busyCasting && me->GetLevel() >= 45 && IsSpellReady(HOWL_OF_TERROR_1, diff))
             {
                 Unit* u = FindCastingTarget(8, 0, FEAR_1); //same immunity
@@ -618,34 +610,37 @@ public:
             //Hellfire interrupt
             Spell const* spell = me->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
             if (spell && spell->GetSpellInfo()->GetFirstRankSpell()->Id == HELLFIRE_1 &&
-                ((!IAmFree() && !master->GetBotMgr()->IsPartyInCombat()) || GetHealthPCT(me) < 25))
+                ((!IAmFree() && !master->GetBotMgr()->IsPartyInCombat(false)) || GetHealthPCT(me) < 25))
                 me->InterruptSpell(CURRENT_CHANNELED_SPELL);
             else
             {
                 spell = me->GetCurrentSpell(CURRENT_GENERIC_SPELL);
-                if (spell)
+                SpellInfo const* baseSpellInfo = spell ? spell->GetSpellInfo()->GetFirstRankSpell() : nullptr;
+                uint32 base_id = baseSpellInfo ? baseSpellInfo->Id : 0;
+                if (baseSpellInfo && (base_id == FEAR_1 || base_id == BANISH_1 || baseSpellInfo->SpellVisual[0] == 99))
                 {
-                    //Fear interrupt
-                    if (spell->GetSpellInfo()->GetFirstRankSpell()->Id == FEAR_1 && spell->m_targets.GetUnitTarget() &&
-                        spell->m_targets.GetUnitTarget()->HasAuraType(SPELL_AURA_MOD_FEAR))
-                        me->InterruptSpell(CURRENT_GENERIC_SPELL);
-                    //Banish interrupt
-                    else if (spell->GetSpellInfo()->GetFirstRankSpell()->Id == BANISH_1 && spell->m_targets.GetUnitTarget())
+                    if (Unit const* target = ObjectAccessor::GetUnit(*me, spell->m_targets.GetObjectTargetGUID()))
                     {
-                        if (AuraEffect const* bani = spell->m_targets.GetUnitTarget()->GetAuraEffect(SPELL_AURA_SCHOOL_IMMUNITY, SPELLFAMILY_WARLOCK, 0x0, 0x8000000, 0x0))
+                        //Fear interrupt
+                        if (base_id == FEAR_1 && target->HasAuraType(SPELL_AURA_MOD_FEAR))
+                            me->InterruptSpell(CURRENT_GENERIC_SPELL);
+                        //Banish interrupt
+                        else if (base_id == BANISH_1)
                         {
-                            //Already banished
-                            //check spell cast time
-                            if (bani->GetBase()->GetDuration() > bani->GetBase()->GetMaxDuration() - 1500)
+                            if (AuraEffect const* bani = target->GetAuraEffect(SPELL_AURA_SCHOOL_IMMUNITY, SPELLFAMILY_WARLOCK, 0x0, 0x8000000, 0x0))
+                            {
+                                //Already banished
+                                //check spell cast time
+                                if (bani->GetBase()->GetDuration() > bani->GetBase()->GetMaxDuration() - 1500)
+                                    me->InterruptSpell(CURRENT_GENERIC_SPELL);
+                            }
+                            else if (!target->getAttackers().empty())
                                 me->InterruptSpell(CURRENT_GENERIC_SPELL);
                         }
-                        else if (!spell->m_targets.GetUnitTarget()->getAttackers().empty())
+                        //Soulstone resurrection interrupt
+                        else if (spell->GetSpellInfo()->SpellVisual[0] == 99 && target->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
                             me->InterruptSpell(CURRENT_GENERIC_SPELL);
                     }
-                    //Soulstone resurrection interrupt
-                    else if (spell->GetSpellInfo()->SpellVisual[0] == 99 && spell->m_targets.GetUnitTarget() &&
-                        spell->m_targets.GetUnitTarget()->GetDummyAuraEffect(SPELLFAMILY_GENERIC, 92, 0))
-                        me->InterruptSpell(CURRENT_GENERIC_SPELL);
                 }
             }
 
@@ -655,7 +650,7 @@ public:
                 uint32 healthStone = InitSpell(me, CREATE_HEALTHSTONE_1);
                 SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(healthStone);
                 //ASSERT(spellInfo);
-                uint32 rank = spellInfo->GetRank();
+                uint32 rank = spellInfo ? spellInfo->GetRank() : 1;
                 //ASSERT(rank >= 1 && rank <= 8);
                 spellInfo = sSpellMgr->GetSpellInfo(_healthStoneSpells[rank - 1]);
                 ASSERT(spellInfo);
@@ -721,40 +716,49 @@ public:
             if (IsCasting())
                 return;
 
+            CheckUsableItems(diff);
+
             DoNormalAttack(diff);
         }
 
         void DoNormalAttack(uint32 diff)
         {
-            StartAttack(opponent, IsMelee());
+            Unit* mytar = opponent ? opponent : disttarget ? disttarget : nullptr;
+            if (!mytar)
+                return;
 
-            MoveBehind(opponent);
+            StartAttack(mytar, IsMelee());
+
+            CheckAttackState();
+            if (!me->IsAlive() || !mytar->IsAlive())
+                return;
+
+            MoveBehind(mytar);
 
             if (GC_Timer > diff)
                 return;
 
-            if (!CanAffectVictim(SPELL_SCHOOL_MASK_SHADOW|SPELL_SCHOOL_MASK_FIRE))
-                return;
+            auto [can_do_shadow, can_do_fire] = CanAffectVictimBools(mytar, SPELL_SCHOOL_SHADOW, SPELL_SCHOOL_FIRE);
 
-            float dist = me->GetDistance(opponent);
+            float dist = me->GetDistance(mytar);
 
             //spell reflections
-            if (IsSpellReady(CURSE_OF_THE_ELEMENTS_1, diff) && dist < CalcSpellMaxRange(CURSE_OF_THE_ELEMENTS_1) &&
-                CanRemoveReflectSpells(opponent, CURSE_OF_THE_ELEMENTS_1) &&
-                doCast(opponent, CURSE_OF_THE_ELEMENTS_1))
+            if (IsSpellReady(CURSE_OF_THE_ELEMENTS_1, diff) && can_do_shadow && dist < CalcSpellMaxRange(CURSE_OF_THE_ELEMENTS_1) &&
+                CanRemoveReflectSpells(mytar, CURSE_OF_THE_ELEMENTS_1) &&
+                doCast(mytar, CURSE_OF_THE_ELEMENTS_1))
                 return;
-            else if (IsSpellReady(CURSE_OF_WEAKNESS_1, diff) && dist < CalcSpellMaxRange(CURSE_OF_WEAKNESS_1) &&
-                CanRemoveReflectSpells(opponent, CURSE_OF_WEAKNESS_1) &&
-                doCast(opponent, CURSE_OF_WEAKNESS_1))
+            else if (IsSpellReady(CURSE_OF_WEAKNESS_1, diff) && can_do_shadow && dist < CalcSpellMaxRange(CURSE_OF_WEAKNESS_1) &&
+                CanRemoveReflectSpells(mytar, CURSE_OF_WEAKNESS_1) &&
+                doCast(mytar, CURSE_OF_WEAKNESS_1))
                 return;
 
             //Offensive heal (Death Coil)
-            if (IsSpellReady(DEATH_COIL_1, diff) && HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(DEATH_COIL_1) &&
+            if (IsSpellReady(DEATH_COIL_1, diff) && can_do_shadow && HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(DEATH_COIL_1) &&
                 GetHealthPCT(me) < 35)
             {
                 //if (me->IsNonMeleeSpellCast(true))
                 //    me->InterruptNonMeleeSpells(true);
-                if (doCast(opponent, GetSpell(DEATH_COIL_1)))
+                if (doCast(mytar, GetSpell(DEATH_COIL_1)))
                     return;
             }
 
@@ -762,7 +766,7 @@ public:
             if (lifeTapCheckTimer <= diff && HasRole(BOT_ROLE_DPS) && Rand() < 75)
             {
                 lifeTapCheckTimer = 10000;
-                if (!me->GetAuraEffect(SPELL_AURA_MOD_SPELL_DAMAGE_OF_STAT_PERCENT, SPELLFAMILY_WARLOCK, 208, 0))
+                if (me->GetLevel() >= 15 && !me->GetAuraEffect(SPELL_AURA_MOD_SPELL_DAMAGE_OF_STAT_PERCENT, SPELLFAMILY_WARLOCK, 208, 0))
                 {
                     //doesn't work: wrong spell proc entry 10.12.2020
                     //if (IsSpellReady(DARK_PACT_1, diff) && botPet && GetManaPCT(me) > 70)
@@ -779,10 +783,10 @@ public:
                 }
             }
             //Shadowfury
-            if (IsSpellReady(SHADOWFURY_1, diff) && HasRole(BOT_ROLE_DPS) && !CCed(opponent, true) && Rand() < 55)
+            if (IsSpellReady(SHADOWFURY_1, diff) && can_do_shadow && HasRole(BOT_ROLE_DPS) && !CCed(mytar, true) && Rand() < 55)
             {
                 if (FindSplashTarget(CalcSpellMaxRange(SHADOWFURY_1)) &&
-                    doCast(opponent, GetSpell(SHADOWFURY_1)))
+                    doCast(mytar, GetSpell(SHADOWFURY_1)))
                     return;
             }
             //Hellfire
@@ -824,15 +828,15 @@ public:
                 }
             }
             //Searing Pain (PvP)
-            if (longCasted && IsSpellReady(SEARING_PAIN_1, diff) && HasRole(BOT_ROLE_DPS) &&
+            if (longCasted && IsSpellReady(SEARING_PAIN_1, diff) && can_do_fire && HasRole(BOT_ROLE_DPS) &&
                 GetSpec() != BOT_SPEC_WARLOCK_AFFLICTION &&
-                opponent->GetTypeId() == TYPEID_PLAYER && Rand() < 35 && dist < CalcSpellMaxRange(SEARING_PAIN_1))
+                mytar->GetTypeId() == TYPEID_PLAYER && Rand() < 35 && dist < CalcSpellMaxRange(SEARING_PAIN_1))
             {
-                if (doCast(opponent, GetSpell(SEARING_PAIN_1)))
+                if (doCast(mytar, GetSpell(SEARING_PAIN_1)))
                     return;
             }
             //Shadowflame
-            if (longCasted && IsSpellReady(SHADOWFLAME_1, diff) && HasRole(BOT_ROLE_DPS) && Rand() < 65)
+            if (longCasted && IsSpellReady(SHADOWFLAME_1, diff) && can_do_shadow && HasRole(BOT_ROLE_DPS) && Rand() < 65)
             {
                 std::list<Unit*> targets;
                 GetNearbyTargetsInConeList(targets, 8); //radius 10 yd
@@ -840,42 +844,42 @@ public:
                     return;
             }
             //Curse, checking affliction range
-            if (curseCheckTimer <= diff && GetSpellCooldown(CURSE_OF_WEAKNESS_1) <= diff && Rand() < 85 &&
-                dist < CalcSpellMaxRange(CURSE_OF_WEAKNESS_1) && opponent->GetHealth() > me->GetMaxHealth() / 4)
+            if (curseCheckTimer <= diff && can_do_shadow && GetSpellCooldown(CURSE_OF_WEAKNESS_1) <= diff && Rand() < 85 &&
+                dist < CalcSpellMaxRange(CURSE_OF_WEAKNESS_1) && mytar->GetHealth() > me->GetMaxHealth() / 4)
             {
                 curseCheckTimer = 2500;
-                uint32 curses = _getCursesMask(opponent);
+                uint32 curses = _getCursesMask(mytar);
                 if (!(curses & CURSE_MASK_MY_CURSE_ANY))
                 {
                     if (!(curses & CURSE_MASK_ELEMENTS) && GetSpell(CURSE_OF_THE_ELEMENTS_1) && !IAmFree() &&
                         (GetSpec() != BOT_SPEC_WARLOCK_AFFLICTION || Rand() < 33) &&
                         master->GetGroup() && master->GetGroup()->GetMembersCount() > 2)
                     {
-                        if (doCast(opponent, GetSpell(CURSE_OF_THE_ELEMENTS_1)))
+                        if (doCast(mytar, GetSpell(CURSE_OF_THE_ELEMENTS_1)))
                             return;
                     }
                     if (!(curses & CURSE_MASK_MY_AGONY) && GetSpell(CURSE_OF_AGONY_1) && HasRole(BOT_ROLE_DPS) &&
-                        opponent->GetHealth() > me->GetMaxHealth() / 4 * (1 + opponent->getAttackers().size()))
+                        mytar->GetHealth() > me->GetMaxHealth() / 4 * (1 + mytar->getAttackers().size()))
                     {
-                        if (doCast(opponent, GetSpell(CURSE_OF_AGONY_1)))
+                        if (doCast(mytar, GetSpell(CURSE_OF_AGONY_1)))
                             return;
                     }
-                    if (!(curses & CURSE_MASK_TONGUES) && GetSpell(CURSE_OF_TONGUES_1) && opponent->GetHealth() > me->GetMaxHealth() / 2 &&
-                        opponent->IsNonMeleeSpellCast(false, false, true))
+                    if (!(curses & CURSE_MASK_TONGUES) && GetSpell(CURSE_OF_TONGUES_1) && mytar->GetHealth() > me->GetMaxHealth() / 2 &&
+                        mytar->IsNonMeleeSpellCast(false, false, true))
                     {
-                        if (doCast(opponent, GetSpell(CURSE_OF_TONGUES_1)))
+                        if (doCast(mytar, GetSpell(CURSE_OF_TONGUES_1)))
                             return;
                     }
-                    if (!(curses & CURSE_MASK_EXHAUSTION) && GetSpell(CURSE_OF_EXHAUSTION_1) && !CCed(opponent, true) &&
-                        opponent->IsControlledByPlayer() && !opponent->HasAuraWithMechanic(1<<MECHANIC_SNARE))
+                    if (!(curses & CURSE_MASK_EXHAUSTION) && GetSpell(CURSE_OF_EXHAUSTION_1) && !CCed(mytar, true) &&
+                        mytar->IsControlledByPlayer() && !mytar->HasAuraWithMechanic(1<<MECHANIC_SNARE))
                     {
-                        if (doCast(opponent, GetSpell(CURSE_OF_EXHAUSTION_1)))
+                        if (doCast(mytar, GetSpell(CURSE_OF_EXHAUSTION_1)))
                             return;
                     }
                     if (!(curses & CURSE_MASK_WEAKNESS) && GetSpell(CURSE_OF_WEAKNESS_1) && me->GetMap()->IsDungeon() &&
-                        opponent->GetMaxHealth() > me->GetMaxHealth() * 2)
+                        mytar->GetMaxHealth() > me->GetMaxHealth() * 2)
                     {
-                        if (doCast(opponent, GetSpell(CURSE_OF_WEAKNESS_1)))
+                        if (doCast(mytar, GetSpell(CURSE_OF_WEAKNESS_1)))
                             return;
                     }
                 }
@@ -885,56 +889,56 @@ public:
                 return;
 
             //Chaos Bolt
-            if (IsSpellReady(CHAOS_BOLT_1, diff) && dist < CalcSpellMaxRange(CHAOS_BOLT_1))
+            if (IsSpellReady(CHAOS_BOLT_1, diff) && can_do_fire && dist < CalcSpellMaxRange(CHAOS_BOLT_1))
             {
-                if (doCast(opponent, GetSpell(CHAOS_BOLT_1)))
+                if (doCast(mytar, GetSpell(CHAOS_BOLT_1)))
                     return;
             }
             //Soul Fire 1
-            if (IsSpellReady(SOUL_FIRE_1, diff) && Rand() < 150 && dist < CalcSpellMaxRange(SOUL_FIRE_1) &&
-                (opponent->IsPolymorphed() || me->HasAuraTypeWithAffectMask(SPELL_AURA_NO_REAGENT_USE, sSpellMgr->GetSpellInfo(SOUL_FIRE_1))))
+            if (IsSpellReady(SOUL_FIRE_1, diff) && can_do_fire && Rand() < 150 && dist < CalcSpellMaxRange(SOUL_FIRE_1) &&
+                (mytar->IsPolymorphed() || me->HasAuraTypeWithAffectMask(SPELL_AURA_NO_REAGENT_USE, sSpellMgr->GetSpellInfo(SOUL_FIRE_1))))
             {
-                if (doCast(opponent, GetSpell(SOUL_FIRE_1)))
+                if (doCast(mytar, GetSpell(SOUL_FIRE_1)))
                     return;
             }
             //Conflagrate (always glyphed, does not consume dot)
-            if (longCasted && IsSpellReady(CONFLAGRATE_1, diff) && dist < CalcSpellMaxRange(CONFLAGRATE_1) &&
-                opponent->HasAuraState(AURA_STATE_CONFLAGRATE) &&
-                opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0, me->GetGUID()))
+            if (longCasted && IsSpellReady(CONFLAGRATE_1, diff) && can_do_fire && dist < CalcSpellMaxRange(CONFLAGRATE_1) &&
+                mytar->HasAuraState(AURA_STATE_CONFLAGRATE) &&
+                mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0, me->GetGUID()))
             {
-                if (doCast(opponent, GetSpell(CONFLAGRATE_1)))
+                if (doCast(mytar, GetSpell(CONFLAGRATE_1)))
                     return;
             }
             //Shadowburn
-            if (longCasted && IsSpellReady(SHADOWBURN_1, diff) && dist < CalcSpellMaxRange(SHADOWBURN_1) &&
-                opponent->HasAuraState(AURA_STATE_HEALTHLESS_35_PERCENT))
+            if (longCasted && IsSpellReady(SHADOWBURN_1, diff) && can_do_shadow && dist < CalcSpellMaxRange(SHADOWBURN_1) &&
+                mytar->HasAuraState(AURA_STATE_HEALTHLESS_35_PERCENT))
             {
-                if (doCast(opponent, GetSpell(SHADOWBURN_1)))
+                if (doCast(mytar, GetSpell(SHADOWBURN_1)))
                     return;
             }
             //Immolate
-            if (IsSpellReady(IMMOLATE_1, diff) && Rand() < 85 && dist < CalcSpellMaxRange(IMMOLATE_1) &&
+            if (IsSpellReady(IMMOLATE_1, diff) && can_do_fire && Rand() < 85 && dist < CalcSpellMaxRange(IMMOLATE_1) &&
                 (GetSpec() != BOT_SPEC_WARLOCK_AFFLICTION || !GetSpell(UNSTABLE_AFFLICTION_1)) &&
-                (GetSpell(CONFLAGRATE_1) || opponent->GetHealth() > me->GetMaxHealth()/4 * (1 + opponent->getAttackers().size())) &&
-                !opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0, me->GetGUID()))
+                (GetSpell(CONFLAGRATE_1) || mytar->GetHealth() > me->GetMaxHealth()/4 * (1 + mytar->getAttackers().size())) &&
+                !mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0, me->GetGUID()))
             {
-                if (doCast(opponent, GetSpell(IMMOLATE_1)))
+                if (doCast(mytar, GetSpell(IMMOLATE_1)))
                     return;
             }
             //Haunt
-            if (IsSpellReady(HAUNT_1, diff) && Rand() < 125 && dist < CalcSpellMaxRange(HAUNT_1) &&
-                opponent->GetHealth() > me->GetMaxHealth()/4 * (1 + opponent->getAttackers().size()) &&
-                !opponent->GetAuraEffect(SPELL_AURA_MOD_DAMAGE_FROM_CASTER, SPELLFAMILY_WARLOCK, 0x0, 0x40000, 0x0, me->GetGUID()))
+            if (IsSpellReady(HAUNT_1, diff) && can_do_shadow && Rand() < 125 && dist < CalcSpellMaxRange(HAUNT_1) &&
+                mytar->GetHealth() > me->GetMaxHealth()/4 * (1 + mytar->getAttackers().size()) &&
+                !mytar->GetAuraEffect(SPELL_AURA_MOD_DAMAGE_FROM_CASTER, SPELLFAMILY_WARLOCK, 0x0, 0x40000, 0x0, me->GetGUID()))
             {
-                if (doCast(opponent, GetSpell(HAUNT_1)))
+                if (doCast(mytar, GetSpell(HAUNT_1)))
                     return;
             }
             //Unstable Affliction
-            if (IsSpellReady(UNSTABLE_AFFLICTION_1, diff) && Rand() < 115 && dist < CalcSpellMaxRange(UNSTABLE_AFFLICTION_1) &&
-                opponent->GetHealth() > me->GetMaxHealth()/4 * (1 + opponent->getAttackers().size()) &&
-                !opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x0, 0x100, 0x0, me->GetGUID()))
+            if (IsSpellReady(UNSTABLE_AFFLICTION_1, diff) && can_do_shadow && Rand() < 115 && dist < CalcSpellMaxRange(UNSTABLE_AFFLICTION_1) &&
+                mytar->GetHealth() > me->GetMaxHealth()/4 * (1 + mytar->getAttackers().size()) &&
+                !mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x0, 0x100, 0x0, me->GetGUID()))
             {
-                if (doCast(opponent, GetSpell(UNSTABLE_AFFLICTION_1)))
+                if (doCast(mytar, GetSpell(UNSTABLE_AFFLICTION_1)))
                     return;
             }
             //Seed of Corruption
@@ -950,27 +954,27 @@ public:
                 SetSpellCooldown(SEED_OF_CORRUPTION_1, 1000); //fail
             }
             //Corruption
-            if (IsSpellReady(CORRUPTION_1, diff) && Rand() < 90 && dist < CalcSpellMaxRange(CORRUPTION_1) &&
-                opponent->GetHealth() > me->GetMaxHealth()/4 * (1 + opponent->getAttackers().size()) &&
-                !opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x2, 0x0, 0x0, me->GetGUID()) &&//corruption
-                !opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x0, 0x10, 0x0, me->GetGUID()))//seed of corruption
+            if (IsSpellReady(CORRUPTION_1, diff) && can_do_shadow && Rand() < 90 && dist < CalcSpellMaxRange(CORRUPTION_1) &&
+                mytar->GetHealth() > me->GetMaxHealth()/4 * (1 + mytar->getAttackers().size()) &&
+                !mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x2, 0x0, 0x0, me->GetGUID()) &&//corruption
+                !mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x0, 0x10, 0x0, me->GetGUID()))//seed of corruption
             {
-                if (doCast(opponent, GetSpell(CORRUPTION_1)))
+                if (doCast(mytar, GetSpell(CORRUPTION_1)))
                     return;
             }
             //Drain Soul: only if can quad damage
-            if (IsSpellReady(DRAIN_SOUL_1, diff) && opponent->GetTypeId() == TYPEID_UNIT &&
-                Rand() < (50 + 85 * me->GetMap()->IsDungeon()) && GetHealthPCT(opponent) < 25 &&
-                opponent->GetHealth() > me->GetMaxHealth() / 2 && dist < CalcSpellMaxRange(DRAIN_SOUL_1))
+            if (IsSpellReady(DRAIN_SOUL_1, diff) && can_do_shadow && mytar->GetTypeId() == TYPEID_UNIT &&
+                Rand() < (50 + 85 * me->GetMap()->IsDungeon()) && GetHealthPCT(mytar) < 25 &&
+                mytar->GetHealth() > me->GetMaxHealth() / 2 && dist < CalcSpellMaxRange(DRAIN_SOUL_1))
             {
-                if (doCast(opponent, GetSpell(DRAIN_SOUL_1)))
+                if (doCast(mytar, GetSpell(DRAIN_SOUL_1)))
                     return;
             }
             //Soul Fire (conditional)
-            if (IsSpellReady(SOUL_FIRE_1, diff) && Rand() < 90 && dist < CalcSpellMaxRange(SOUL_FIRE_1) &&
-                opponent->GetHealth() > me->GetMaxHealth()/8 * (1 + opponent->getAttackers().size()) && me->HasAura(BACKDRAFT_BUFF))
+            if (IsSpellReady(SOUL_FIRE_1, diff) && can_do_fire && Rand() < 90 && dist < CalcSpellMaxRange(SOUL_FIRE_1) &&
+                mytar->GetHealth() > me->GetMaxHealth()/8 * (1 + mytar->getAttackers().size()) && me->HasAura(BACKDRAFT_BUFF))
             {
-                if (doCast(opponent, GetSpell(SOUL_FIRE_1)))
+                if (doCast(mytar, GetSpell(SOUL_FIRE_1)))
                     return;
             }
             //Main: Shadow Bolt, Incinerate, Searing Pain (tank), checking destruction range
@@ -979,23 +983,37 @@ public:
                 uint32 boltinerate =
                     IsTank() && GetSpell(SEARING_PAIN_1) ? SEARING_PAIN_1 :
                     GetSpell(SHADOW_BOLT_1) && GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION ? SHADOW_BOLT_1 :
-                    GetSpell(INCINERATE_1) && opponent->HasAuraState(AURA_STATE_CONFLAGRATE) ?
-                    //opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0) &&
-                    //opponent->GetAuraEffect(SPELL_AURA_MOD_ATTACKER_SPELL_CRIT_CHANCE, SPELLFAMILY_WARLOCK, 213, 0) &&
+                    GetSpell(INCINERATE_1) && mytar->HasAuraState(AURA_STATE_CONFLAGRATE) ?
+                    //mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0) &&
+                    //mytar->GetAuraEffect(SPELL_AURA_MOD_ATTACKER_SPELL_CRIT_CHANCE, SPELLFAMILY_WARLOCK, 213, 0) &&
                     //(me->GetMap()->IsRaid() || !me->HasAura(SHADOW_TRANCE_BUFF)) ?
                     INCINERATE_1 : SHADOW_BOLT_1;
 
-                if (boltinerate && doCast(opponent, GetSpell(boltinerate)))
+                bool can_cast_boltinerate;
+                switch (boltinerate)
+                {
+                    case SEARING_PAIN_1: case INCINERATE_1:
+                        can_cast_boltinerate = can_do_fire;
+                        break;
+                    case SHADOW_BOLT_1:
+                        can_cast_boltinerate = can_do_shadow;
+                        break;
+                    default:
+                        can_cast_boltinerate = true;
+                        break;
+                }
+
+                if (boltinerate && can_cast_boltinerate && doCast(mytar, GetSpell(boltinerate)))
                     return;
             }
 
             if (Spell const* shot = me->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
             {
-                if (shot->GetSpellInfo()->Id == SHOOT_WAND && shot->m_targets.GetUnitTarget() != opponent)
+                if (shot->GetSpellInfo()->Id == SHOOT_WAND && shot->m_targets.GetUnitTarget() != mytar)
                     me->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
             }
-            else if (IsSpellReady(SHOOT_WAND, diff) && me->GetDistance(opponent) < 30 && GetEquips(BOT_SLOT_RANGED) &&
-                doCast(opponent, SHOOT_WAND))
+            else if (IsSpellReady(SHOOT_WAND, diff) && !me->isMoving() && me->GetDistance(mytar) < 30 && GetEquips(BOT_SLOT_RANGED) &&
+                doCast(mytar, SHOOT_WAND))
                 return;
         }
 
@@ -1014,15 +1032,15 @@ public:
             }
 
             //Devastation: 5% additional critical chance for Destruction spells
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) &&
                 lvl >= 30 && spellInfo->SpellFamilyName == SPELLFAMILY_WARLOCK &&
                 ((spellInfo->SpellFamilyFlags[0] & 0x3E5) || (spellInfo->SpellFamilyFlags[1] & 0x8310C0)))
                 crit_chance += 5.f;
             //Fire and Brimstone part 2: 25% additional critical chance for Conflagrate
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 55 && baseId == CONFLAGRATE_1)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 55 && baseId == CONFLAGRATE_1)
                 crit_chance += 25.f;
             //Malediction part 2: 9% additional critical chance for Corruption and Unstable Affliction
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                 lvl >= 45 && (baseId == CORRUPTION_1 || baseId == UNSTABLE_AFFLICTION_1))
                 crit_chance += 9.f;
             //Glyph of Shadowburn: 20% additional critical chance for Shadowburn on targets 35% hp and below
@@ -1032,15 +1050,15 @@ public:
             if (lvl >= 10 && (baseId == SEED_OF_CORRUPTION_1 || baseId == SEED_OF_CORRUPTION_FINAL_DAMAGE_1))
                 crit_chance += 5.f;
             //Improved Searing Pain: 10% additional critical chance for Searing Pain
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 25 && baseId == SEARING_PAIN_1)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 25 && baseId == SEARING_PAIN_1)
                 crit_chance += 10.f;
 
             //Master Demonologist part 1.2 (me): 5% additional critical chance for Fire spells
-            if ((_spec == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
                 lvl >= 35 && botPet && myPetType == BOT_PET_IMP && (spellInfo->GetSchoolMask() & SPELL_SCHOOL_MASK_FIRE))
                 crit_chance += 5.f;
             //Master Demonologist part 3.2 (me): 5% additional critical chance for Shadow spells
-            if ((_spec == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
                 lvl >= 35 && botPet && myPetType == BOT_PET_SUCCUBUS && (spellInfo->GetSchoolMask() & SPELL_SCHOOL_MASK_SHADOW))
                 crit_chance += 5.f;
 
@@ -1066,7 +1084,7 @@ public:
                     ((spellInfo->SpellFamilyFlags[0] & 0x13E5) || (spellInfo->SpellFamilyFlags[1] & 0xC310C0)))
                     pctbonus += 0.333f;
                 //Pandemic part 2,3: crit damage for periodics and haunt
-                if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+                if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                     lvl >= 50 && spellInfo->SpellFamilyName == SPELLFAMILY_WARLOCK &&
                     ((spellInfo->SpellFamilyFlags[0] & 0x2) || (spellInfo->SpellFamilyFlags[1] & 0x40100)))
                     pctbonus += 0.333f;
@@ -1081,20 +1099,20 @@ public:
             if (baseId == INCINERATE_1)
                 pctbonus += 0.05f;
             //Improved Immolate: 30% bonus damage for Immolate
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 30 && baseId == IMMOLATE_1)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 30 && baseId == IMMOLATE_1)
                 pctbonus += 0.3f;
             //EmberStorm part 1: 15% bonus damage for Fire spells
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) &&
                 lvl >= 35 && spellInfo->SpellFamilyName == SPELLFAMILY_WARLOCK &&
                 ((spellInfo->SpellFamilyFlags[0] & 0x364) || (spellInfo->SpellFamilyFlags[1] & 0x8200C0)))
                 pctbonus += 0.15f;
             //Fire and Brimstone part 1: 10% bonus damage for Incinerate and Chaos Bolt
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) &&
                 lvl >= 55 && (baseId == INCINERATE_1 || baseId == CHAOS_BOLT_1) &&
                 damageinfo.target->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_WARLOCK, 0x4, 0x0, 0x0, me->GetGUID()))
                 pctbonus += 0.1f;
             //Molten Core part 1: 18% bonus damage for Incinerate and Soul Fire
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) &&
                 lvl >= 35 && (baseId == INCINERATE_1 || baseId == SOUL_FIRE_1))
             {
                 if (me->HasAura(MOLTEN_CORE_BUFF))
@@ -1107,10 +1125,10 @@ public:
             if (lvl >= 40 && baseId == CORRUPTION_1)
                 pctbonus += 0.12f;
             //Malediction part 1: 3% bonus damage for All spells
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) && lvl >= 45)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) && lvl >= 45)
                 pctbonus += 0.03f;
             //Death's Embrace part 2: 12% bonus damage for Shadow spells on targets below 35 pct health
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                 lvl >= 50 && damageinfo.target->HasAuraState(AURA_STATE_HEALTHLESS_35_PERCENT) &&
                 ((spellInfo->SpellFamilyFlags[0] & 0x8248B) || (spellInfo->SpellFamilyFlags[1] & 0x59913)))
                 pctbonus += 0.12f;
@@ -1119,11 +1137,11 @@ public:
             if (lvl >= 25 && baseId == CORRUPTION_1)
                 fdamage += me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC) * 0.36f * me->CalculateDefaultCoefficient(spellInfo, DOT) * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo);
             //Shadow and Flame: 20% spellpower bonus for Shadow Bolt, Shadowburn, Chaos Bolt and Incineration
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 45 &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 45 &&
                 (baseId == SHADOW_BOLT_1 || baseId == CHAOS_BOLT_1 || baseId == SHADOWBURN_1 || baseId == INCINERATE_1))
                 fdamage += me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC) * 0.2f * me->CalculateDefaultCoefficient(spellInfo, SPELL_DIRECT_DAMAGE) * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo);
             //Everlasting Affliction part 1: 5% spellpower bonus for Corruption and Unstable Affliction
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                 lvl >= 55 && (baseId == CORRUPTION_1 || baseId == UNSTABLE_AFFLICTION_1))
                 fdamage += me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC) * 0.05f * me->CalculateDefaultCoefficient(spellInfo, DOT) * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo);
 
@@ -1141,11 +1159,11 @@ public:
             if (lvl >= 10 && baseId == CURSE_OF_AGONY_1)
                 pctbonus += 0.1f;
             //Shadow Mastery: 15% bonus damage for Shadow Spells
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                 lvl >= 35 && ((spellInfo->SpellFamilyFlags[0] & 0x80091) || spellInfo->SpellFamilyFlags[1] & 0x451910))
                 pctbonus += 0.15f;
             //Contagion: 5% bonus damage for Curse of Agony, Corruption and Seed of Corruption
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) &&
                 lvl >= 40 && (baseId == CORRUPTION_1 || baseId == SEED_OF_CORRUPTION_1 ||
                 baseId == SEED_OF_CORRUPTION_FINAL_DAMAGE_1 || baseId == CURSE_OF_AGONY_1))
                 pctbonus += 0.05f;
@@ -1164,14 +1182,14 @@ public:
                 pctbonus += 0.1f;
 
             //Demonic Pact part 1: 10% bonus damage for all spells
-            if ((_spec == BOT_SPEC_WARLOCK_DEMONOLOGY) && lvl >= 55)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY) && lvl >= 55)
                 pctbonus *= 1.1f;
             //Master Demonologist part 1.1 (me): 5% bonus damage for Fire spells
-            if ((_spec == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
                 lvl >= 35 && botPet && myPetType == BOT_PET_IMP && (spellInfo->GetSchoolMask() & SPELL_SCHOOL_MASK_FIRE))
                 pctbonus *= 1.05f;
             //Master Demonologist part 3.1 (me): 5% bonus damage for Shadow spells
-            if ((_spec == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY) &&
                 lvl >= 35 && botPet && myPetType == BOT_PET_SUCCUBUS && (spellInfo->GetSchoolMask() & SPELL_SCHOOL_MASK_SHADOW))
                 pctbonus *= 1.05f;
 
@@ -1241,7 +1259,7 @@ public:
                     timebonus += casttime;
             }
             //Improved Howl of Terror: -1.5sec (-100%) cast time for Howl of Terror
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) && lvl >= 45 && baseId == HOWL_OF_TERROR_1)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) && lvl >= 45 && baseId == HOWL_OF_TERROR_1)
                 timebonus += casttime;
             //Chaotic Mind (custom)
             if (baseId == SOUL_FIRE_1)
@@ -1282,7 +1300,7 @@ public:
                     timebonus += 2000;
             }
             //EmberStorm part 2: -0.25 sec cast time for Incinerate
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 35 && baseId == INCINERATE_1)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 35 && baseId == INCINERATE_1)
                 timebonus += 250;
             //Glyph of Unstable Affliction: -0.2 sec cast time for Unstable Affliction
             if (lvl >= 50 && baseId == UNSTABLE_AFFLICTION_1)
@@ -1294,6 +1312,32 @@ public:
             casttime = std::max<int32>((float(casttime) * (1.0f - pctbonus)) - timebonus, 0);
 
             instaCast = (casttime <= 500); //triggered GCD is too long
+        }
+
+        void ApplyClassSpellNotLoseCastTimeMods(SpellInfo const* spellInfo, int32& delayReduce) const override
+        {
+            uint32 baseId = spellInfo->GetFirstRankSpell()->Id;
+            //SpellSchoolMask schools = spellInfo->GetSchoolMask();
+            uint8 lvl = me->GetLevel();
+            int32 reduceBonus = 0;
+
+            if (lvl >= 20 && (/*baseId == DRAIN_LIFE_1 || */baseId == DRAIN_MANA_1 || baseId == DRAIN_SOUL_1 || baseId == UNSTABLE_AFFLICTION_1 || baseId == HAUNT_1))
+                reduceBonus += 70;
+
+            if (GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION && lvl >= 25)
+            {
+                switch (baseId)
+                {
+                    case CHAOS_BOLT_1: case HELLFIRE_1: case IMMOLATE_1: case INCINERATE_1: case RAIN_OF_FIRE_1:
+                    case SEARING_PAIN_1: case SHADOW_BOLT_1: case SOUL_FIRE_1: case SHADOWBURN_1: case SHADOWFURY_1:
+                        reduceBonus += 70;
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            delayReduce += reduceBonus;
         }
 
         void ApplyClassSpellCooldownMods(SpellInfo const* /*spellInfo*/, uint32& cooldown) const override
@@ -1348,7 +1392,7 @@ public:
 
             //pct mods
             //BackDraft: -30% global cooldown for Destruction spells
-            if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) &&
+            if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) &&
                 lvl >= 50 && spellInfo->SpellFamilyName == SPELLFAMILY_WARLOCK &&
                 ((spellInfo->SpellFamilyFlags[0] & 0x165) || (spellInfo->SpellFamilyFlags[1] & 0x310C0)) &&
                 me->HasAura(BACKDRAFT_BUFF))
@@ -1495,7 +1539,7 @@ public:
                 //level * 3 based on in-game tooltip and spellwork (BasePoints = 2000 + Level * 4,00)
                 int32 damage = spell->_effects[0].CalcValue(me);
                 int32 manaGain = damage;
-                damage += int32(me->GetLevel() * 3);
+                //damage += int32(me->GetLevel() * 3);
                 manaGain += 0.5f * me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC);
 
                 //Life Tap (id: 28830)
@@ -1510,7 +1554,7 @@ public:
                 me->CastSpell(me, LIFE_TAP_ENERGIZE, args);
 
                 //Mana Feed
-                if ((_spec == BOT_SPEC_WARLOCK_DEMONOLOGY) && me->GetLevel() >= 35 && botPet)
+                if ((GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY) && me->GetLevel() >= 35 && botPet)
                     me->EnergizeBySpell(botPet, LIFE_TAP_ENERGIZE_PET, manaGain, POWER_MANA);
             }
 
@@ -1580,7 +1624,7 @@ public:
             }
 
             //Improved Felhunter part 3
-            if ((_spec == BOT_SPEC_WARLOCK_AFFLICTION) && lvl >= 35 && baseId == FEL_INTELLIGENCE_1 && botPet)
+            if ((GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION) && lvl >= 35 && baseId == FEL_INTELLIGENCE_1 && botPet)
             {
                 Aura const* feli = target->GetAura(spellId, botPet->GetGUID());
                 if (feli)
@@ -1615,7 +1659,7 @@ public:
                     //Improved Corruption and Immolate (37380): +3 sec duration for Immolate and Corruption
                     uint32 dur = per->GetDuration() + 3000;
                     //Molten Core: + 9 sec duration for Immolate
-                    if ((_spec == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 35 && baseId == IMMOLATE_1)
+                    if ((GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION) && lvl >= 35 && baseId == IMMOLATE_1)
                         dur += 9000;
                     per->SetDuration(dur);
                     per->SetMaxDuration(dur);
@@ -1687,7 +1731,7 @@ public:
         void SummonBotPet()
         {
             if (botPet)
-                UnsummonAll();
+                UnsummonAll(false);
 
             if (myPetType == BOT_PET_INVALID) //disabled
                 return;
@@ -1699,7 +1743,7 @@ public:
 
             if (myPetType)
                 entry = myPetType;
-            else if (me->GetLevel() >= 50 && _spec == BOT_SPEC_WARLOCK_DEMONOLOGY)
+            else if (me->GetLevel() >= 50 && GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY)
                 entry = BOT_PET_FELGUARD;
             else if (!IAmFree())
             {
@@ -1747,12 +1791,11 @@ public:
             Creature* myPet = me->SummonCreature(myPetType, *me, TEMPSUMMON_CORPSE_DESPAWN);
             me->GetNearPoint(myPet, pos.m_positionX, pos.m_positionY, pos.m_positionZ, 0, me->GetOrientation() + M_PI / 2);
             myPet->GetMotionMaster()->MovePoint(me->GetMapId(), pos);
-            myPet->SetCreatorGUID(master->GetGUID());
+            myPet->SetCreator(master);
             myPet->SetOwnerGUID(me->GetGUID());
             myPet->SetFaction(master->GetFaction());
             myPet->SetControlledByPlayer(!IAmFree());
             myPet->SetPvP(me->IsPvP());
-            myPet->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
             myPet->SetByteValue(UNIT_FIELD_BYTES_2, 1, master->GetByteValue(UNIT_FIELD_BYTES_2, 1));
 
             //fix scale and equips
@@ -1770,10 +1813,9 @@ public:
             botPet = myPet;
         }
 
-        void UnsummonAll() override
+        void UnsummonAll(bool savePets = true) override
         {
-            if (botPet)
-                botPet->ToTempSummon()->UnSummon();
+            UnsummonPet(savePets);
         }
 
         void SummonedCreatureDies(Creature* /*summon*/, Unit* /*killer*/) override
@@ -1783,7 +1825,7 @@ public:
         void SummonedCreatureDespawn(Creature* summon) override
         {
             //all warlock bot pets despawn at death or manually (gossip, teleport, etc.)
-            //TC_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: %s's %s", me->GetName().c_str(), summon->GetName().c_str());
+            //BOT_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: {}'s {}", me->GetName(), summon->GetName());
             if (summon == botPet)
             {
                 petSummonTimer = 10000;
@@ -1824,7 +1866,7 @@ public:
                 case BOTAI_MISC_PET_AVAILABLE_4:
                     return me->GetLevel() >= 30 ? BOT_PET_FELHUNTER : 0;
                 case BOTAI_MISC_PET_AVAILABLE_5:
-                    return me->GetLevel() >= 50 && _spec == BOT_SPEC_WARLOCK_DEMONOLOGY ? BOT_PET_FELGUARD : 0;
+                    return me->GetLevel() >= 50 && GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY ? BOT_PET_FELGUARD : 0;
                 default:
                     return 0;
             }
@@ -1839,18 +1881,18 @@ public:
                     break;
                 case BOTAI_MISC_PET_TYPE:
                     myPetType = value;
-                    UnsummonAll();
+                    UnsummonAll(false);
                     break;
                 default:
                     break;
             }
+
+            bot_ai::SetAIMiscValue(data, value);
         }
 
         void Reset() override
         {
-            UnsummonAll();
-
-            myPetType = 0;
+            UnsummonAll(false);
 
             fearTimer = 0;
             banishTimer = 0;
@@ -1894,9 +1936,9 @@ public:
         void InitSpells() override
         {
             uint8 lvl = me->GetLevel();
-            bool isAffl = _spec == BOT_SPEC_WARLOCK_AFFLICTION;
-            //bool isDemo = _spec == BOT_SPEC_WARLOCK_DEMONOLOGY;
-            bool isDest = _spec == BOT_SPEC_WARLOCK_DESTRUCTION;
+            bool isAffl = GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION;
+            //bool isDemo = GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY;
+            bool isDest = GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION;
 
             InitSpellMap(CURSE_OF_WEAKNESS_1);
             InitSpellMap(CURSE_OF_AGONY_1);
@@ -1948,9 +1990,9 @@ public:
         void ApplyClassPassives() const override
         {
             uint8 level = master->GetLevel();
-            bool isAffl = _spec == BOT_SPEC_WARLOCK_AFFLICTION;
-            bool isDemo = _spec == BOT_SPEC_WARLOCK_DEMONOLOGY;
-            bool isDest = _spec == BOT_SPEC_WARLOCK_DESTRUCTION;
+            bool isAffl = GetSpec() == BOT_SPEC_WARLOCK_AFFLICTION;
+            bool isDemo = GetSpec() == BOT_SPEC_WARLOCK_DEMONOLOGY;
+            bool isDest = GetSpec() == BOT_SPEC_WARLOCK_DESTRUCTION;
 
             RefreshAura(CHAOS_BOLT_PASSIVE);
             RefreshAura(DEMONIC_IMMOLATE_PASSIVE);

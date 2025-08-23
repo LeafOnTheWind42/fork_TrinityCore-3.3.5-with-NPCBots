@@ -1,5 +1,8 @@
 #include "bot_ai.h"
 #include "botmgr.h"
+#include "bottext.h"
+#include "bottraits.h"
+#include "Containers.h"
 #include "Group.h"
 #include "Item.h"
 #include "Log.h"
@@ -305,6 +308,13 @@ public:
         {
             _botclass = BOT_CLASS_SHAMAN;
 
+            mhEnchantExpireTimer = 1;
+            ohEnchantExpireTimer = 1;
+            mhEnchant = 0;
+            ohEnchant = 0;
+            needChooseMHEnchant = true;
+            needChooseOHEnchant = true;
+
             InitUnitFlags();
         }
 
@@ -337,11 +347,11 @@ public:
             GetInPosition(force, u);
         }
 
-        void JustEnteredCombat(Unit* u) override { TotemsCheckTimer = 0; bot_ai::JustEnteredCombat(u); }
+        void JustEnteredCombat(Unit* u) override { TotemsCheckTimer = 0; canTremor = false; bot_ai::JustEnteredCombat(u); }
         void KilledUnit(Unit* u) override { bot_ai::KilledUnit(u); }
         void EnterEvadeMode(EvadeReason why = EVADE_REASON_OTHER) override { bot_ai::EnterEvadeMode(why); }
         void MoveInLineOfSight(Unit* u) override { bot_ai::MoveInLineOfSight(u); }
-        void JustDied(Unit* u) override { UnsummonAll(); removeShapeshiftForm(); bot_ai::JustDied(u); }
+        void JustDied(Unit* u) override { UnsummonAll(false); removeShapeshiftForm(); bot_ai::JustDied(u); }
 
         bool removeShapeshiftForm() override
         {
@@ -437,7 +447,7 @@ public:
                     Unit* to = ObjectAccessor::GetUnit(*me, _totems[i].first);
                     if (!to)
                     {
-                        TC_LOG_ERROR("entities.player", "%s has unexpectingly lost totem in slot %u!", me->GetName().c_str(), i);
+                        BOT_LOG_ERROR("entities.player", "{} has unexpectingly lost totem in slot {}!", me->GetName(), i);
                         _totems[i].first = ObjectGuid::Empty;
                         continue;
                     }
@@ -455,47 +465,53 @@ public:
 
             std::map<uint32, uint32> idMap;
             uint32 mask = _getTotemsMask(idMap);
+            Group const* gr = GetGroup();
+            std::vector<Unit*> members = BotMgr::GetAllGroupMembers(gr);
+            uint8 subgr = GetSubGroup();
 
             //EARTH
             //EARTHsituative1 : tremor
             if (TotemTimer[T_EARTH] <= diff && me->IsInCombat() && !IAmFree() &&
                 IsSpellReady(TREMOR_TOTEM_1, diff, false) && _totems[T_EARTH].second._type != BOT_TOTEM_TREMOR)
             {
-                //Tremor no cd, party members only
-                Group const* gr = master->GetGroup();
-                if (gr && gr->IsMember(me->GetGUID()))
+                //Tremor no cd
+                if (Unit const* victim = me->GetVictim())
                 {
-                    uint8 subgr = gr->GetMemberGroup(me->GetGUID());
-                    uint8 count = 0;
-                    for (GroupReference const* ref = gr->GetFirstMember(); ref != nullptr; ref = ref->next())
+                    if (Spell const* vspell = victim->GetCurrentSpell(CURRENT_GENERIC_SPELL))
                     {
-                        if (ref->getSubGroup() != subgr) continue;
-                        Player* pl = ref->GetSource();
-                        if (!pl || !pl->IsInWorld() || pl->IsBeingTeleported()) continue;
-                        if (me->GetMap() != pl->FindMap() || !pl->InSamePhase(me)) continue;
-                        if (me->GetDistance(pl) < 20 &&
-                            pl->HasAuraWithMechanic((1<<MECHANIC_CHARM)|(1<<MECHANIC_FEAR)|(1<<MECHANIC_SLEEP)))
-                            ++count;
-
-                        if (!pl->HaveBot()) continue;
-                        BotMap const* map = pl->GetBotMgr()->GetBotMap();
-                        for (BotMap::const_iterator it = map->begin(); it != map->end(); ++it)
+                        if (vspell->m_targets.GetUnitTargetGUID() == me->GetGUID())
                         {
-                            if (!gr->IsMember(it->second->GetGUID()) || gr->GetMemberGroup(it->second->GetGUID()) != subgr) continue;
-                            Creature* bot = it->second;
-                            if (!bot || !bot->IsInWorld() || me->GetMap() != bot->FindMap() ||
-                                !bot->InSamePhase(me) || me->GetDistance(bot) > 20) continue;
-                            if (bot->HasAuraWithMechanic((1<<MECHANIC_CHARM)|(1<<MECHANIC_FEAR)|(1<<MECHANIC_SLEEP)))
-                                ++count;
+                            SpellInfo const* vspellInfo = vspell->GetSpellInfo();
+                            static const std::array<uint32, 3> TremorMechanics = { MECHANIC_FEAR, MECHANIC_CHARM, MECHANIC_SLEEP };
+                            static const auto is_tremor_effect = [](SpellEffectInfo const& effect) {  return effect.IsAura(SPELL_AURA_MOD_FEAR) || effect.IsAura(SPELL_AURA_MOD_CHARM); };
+                            if (std::find(TremorMechanics.cbegin(), TremorMechanics.cend(), vspellInfo->Mechanic) != TremorMechanics.cend() ||
+                                std::any_of(vspellInfo->_effects.cbegin(), vspellInfo->_effects.cend(), is_tremor_effect))
+                            {
+                                canTremor = true;
+                            }
                         }
                     }
-
-                    if (count >= (1 + 1*((mask & BOT_TOTEM_MASK_MY_TOTEM_EARTH) != 0)))
+                }
+                if (!canTremor)
+                {
+                    uint8 count = 0;
+                    for (Unit const* member : members)
                     {
-                        if (doCast(me, GetSpell(TREMOR_TOTEM_1), CotE ? TRIGGERED_CAST_DIRECTLY : TRIGGERED_NONE))
-                            if (!CotE)
-                                return;
+                        if (me->GetMap() != member->FindMap() || !member->InSamePhase(me) ||
+                            !member->IsAlive() || me->GetDistance(member) > 20 ||
+                            (member->IsPlayer() ? member->ToPlayer()->GetSubGroup() : member->ToCreature()->GetSubGroup()) != subgr ||
+                            (member->IsNPCBot() && member->ToCreature()->IsTempBot()) ||
+                            !member->HasAuraWithMechanic((1<<MECHANIC_CHARM)|(1<<MECHANIC_FEAR)|(1<<MECHANIC_SLEEP)))
+                            continue;
+                        ++count;
                     }
+                    canTremor = count >= (1 + 1*(!!(mask & BOT_TOTEM_MASK_MY_TOTEM_EARTH)));
+                }
+                if (canTremor)
+                {
+                    if (doCast(me, GetSpell(TREMOR_TOTEM_1), CotE ? TRIGGERED_CAST_DIRECTLY : TRIGGERED_NONE))
+                        if (!CotE)
+                            return;
                 }
                 //check if casted
                 if (_totems[T_EARTH].second._type != BOT_TOTEM_TREMOR)
@@ -654,44 +670,26 @@ public:
             {
                 //5 min cd, party members only, instant effect +4 ticks in 12 secs
                 bool cast = false;
-                Group const* gr = master->GetGroup();
-                if (gr && gr->IsMember(me->GetGUID()))
+                if (master->IsInCombat() && master->GetPowerType() == POWER_MANA &&
+                    GetManaPCT(master) < 35 && me->GetDistance(master) < 18)
+                    cast = true;
+                else if (me->IsInCombat() && GetManaPCT(me) < 35)
+                    cast = true;
+                else
                 {
                     uint8 count = 0;
-                    uint8 subgr = gr->GetMemberGroup(me->GetGUID());
-                    for (GroupReference const* ref = gr->GetFirstMember(); ref != nullptr; ref = ref->next())
+                    for (Unit const* member : members)
                     {
-                        if (ref->getSubGroup() != subgr) continue;
-                        Player* pl = ref->GetSource();
-                        if (!pl || !pl->IsInWorld() || pl->IsBeingTeleported()) continue;
-                        if (me->GetMap() != pl->FindMap() || !pl->InSamePhase(me)) continue;
-                        if (pl->IsInCombat() && pl->GetPowerType() == POWER_MANA &&
-                            GetManaPCT(pl) < 35 && me->GetDistance(pl) < 25)
-                            ++count;
-
-                        if (!pl->HaveBot()) continue;
-                        BotMap const* map = pl->GetBotMgr()->GetBotMap();
-                        for (BotMap::const_iterator it = map->begin(); it != map->end(); ++it)
-                        {
-                            if (!gr->IsMember(it->second->GetGUID()) || gr->GetMemberGroup(it->second->GetGUID()) != subgr) continue;
-                            Creature* bot = it->second;
-                            if (!bot || !bot->IsInWorld() || me->GetMap() != bot->FindMap() || !bot->InSamePhase(me)) continue;
-                            if (bot->IsInCombat() && bot->GetPowerType() == POWER_MANA &&
-                                GetManaPCT(bot) < 35 && me->GetDistance(bot) < 20)
-                                ++count;
-                        }
+                        if (me->GetMap() != member->FindMap() || !member->InSamePhase(me) ||
+                            !member->IsAlive() || !member->IsInCombat() || member->GetPowerType() != POWER_MANA ||
+                            (member->IsPlayer() ? member->ToPlayer()->GetSubGroup() : member->ToCreature()->GetSubGroup()) != subgr ||
+                            GetManaPCT(member) > 35 || me->GetDistance(member) > 20 ||
+                            (member->IsNPCBot() && member->ToCreature()->IsTempBot()))
+                            continue;
+                        ++count;
                     }
-                    cast = (count >= (3 + 1*((mask & BOT_TOTEM_MASK_MY_TOTEM_WATER) != 0)));
+                    cast = (count >= (3 + 1*(!!(mask & BOT_TOTEM_MASK_MY_TOTEM_WATER))));
                 }
-                if (!cast)
-                {
-                    if (master->IsInCombat() && master->GetPowerType() == POWER_MANA &&
-                        GetManaPCT(master) < 35 && me->GetDistance(master) < 18)
-                        cast = true;
-                    else if (me->IsInCombat() && GetManaPCT(me) < 35)
-                        cast = true;
-                }
-
                 if (cast)
                 {
                     if (doCast(me, GetSpell(MANA_TIDE_TOTEM_1), CotE ? TRIGGERED_CAST_DIRECTLY : TRIGGERED_NONE))
@@ -715,45 +713,23 @@ public:
                 {
                     //no cd
                     bool cast = false;
-                    if (!IAmFree())
-                    {
-                        Group const* gr = master->GetGroup();
-                        if (gr)
-                        {
-                            for (GroupReference const* ref = gr->GetFirstMember(); ref != nullptr; ref = ref->next())
-                            {
-                                Player* pl = ref->GetSource();
-                                if (!pl || !pl->IsInWorld() || pl->IsBeingTeleported()) continue;
-                                if (me->GetMap() != pl->FindMap() || !pl->InSamePhase(me)) continue;
-                                if (pl->isMoving()) continue;
-                                if (pl->GetPowerType() == POWER_MANA && GetManaPCT(pl) < 85 && me->GetDistance(pl) < 25)
-                                {
-                                    cast = true;
-                                    break;
-                                }
-
-                                if (!pl->HaveBot()) continue;
-                                BotMap const* map = pl->GetBotMgr()->GetBotMap();
-                                for (BotMap::const_iterator it = map->begin(); it != map->end(); ++it)
-                                {
-                                    Creature* bot = it->second;
-                                    if (!bot || !bot->IsInWorld() || me->GetMap() != bot->FindMap() || !bot->InSamePhase(me)) continue;
-                                    if (bot->GetPowerType() == POWER_MANA && GetManaPCT(bot) < 35 && me->GetDistance(bot) < 25)
-                                    {
-                                        cast = true;
-                                        break;
-                                    }
-                                }
-                                if (cast)
-                                    break;
-                            }
-                        }
-                        else if (!master->isMoving() && master->GetPowerType() == POWER_MANA && GetManaPCT(master) < 85)
-                            cast = true;
-                    }
-                    if (!me->isMoving() && GetManaPCT(me) < 95)
+                    if (!master->isMoving() && master->GetPowerType() == POWER_MANA && GetManaPCT(master) < 85)
                         cast = true;
-
+                    else if (!me->isMoving() && GetManaPCT(me) < 95)
+                        cast = true;
+                    else
+                    {
+                        for (Unit const* member : members)
+                        {
+                            if (me->GetMap() != member->FindMap() || !member->InSamePhase(me) ||
+                                !member->IsAlive() || member->GetPowerType() != POWER_MANA ||
+                                GetManaPCT(member) > 85 || me->GetDistance(member) > 25 ||
+                                (member->IsNPCBot() && member->ToCreature()->IsTempBot()))
+                                continue;
+                            cast = true;
+                            break;
+                        }
+                    }
                     if (cast)
                     {
                         if (doCast(me, MSpring, CotE ? TRIGGERED_CAST_DIRECTLY : TRIGGERED_NONE))
@@ -783,23 +759,16 @@ public:
             {
                 //grounding 15 sec cd, party members only (and bot and master of course)
                 bool cast = false;
-                Unit* u = FindCastingTarget(27); //totem must be within cast distance
-                if (u && !IsChanneling(u)) //do not waste grounding on periodic ticks
+                if (Unit const* u = FindCastingTarget(27)) //totem must be within cast distance
                 {
-                    Group const* gr = !IAmFree() ? master->GetGroup() : nullptr;
-                    for (uint8 i = CURRENT_FIRST_NON_MELEE_SPELL; i != CURRENT_AUTOREPEAT_SPELL; ++i)
+                    if (Spell const* spell = u->GetCurrentSpell(CURRENT_GENERIC_SPELL))
                     {
-                        if (Spell const* spell = u->GetCurrentSpell(i))
+                        ObjectGuid tGuid = spell->m_targets.GetUnitTargetGUID();
+                        if (tGuid == me->GetGUID() || tGuid == master->GetGUID() || (gr && gr->IsMember(tGuid) && gr->SameSubGroup(tGuid, me->GetGUID())))
                         {
-                            ObjectGuid tGuid = spell->m_targets.GetUnitTargetGUID();
-                            if (tGuid == me->GetGUID() || tGuid == master->GetGUID() ||
-                                (gr && gr->IsMember(tGuid) && gr->IsMember(me->GetGUID()) && gr->SameSubGroup(tGuid, me->GetGUID())))
-                            {
-                                Unit* t = ObjectAccessor::GetUnit(*me, tGuid);
-                                if (t && t->GetDistance(me) < 27 && !t->HasAuraType(SPELL_AURA_SPELL_MAGNET))
-                                    cast = true;
-                            }
-                            break;
+                            Unit const* t = ObjectAccessor::GetUnit(*me, tGuid);
+                            if (t && t->GetDistance(me) < 27 && !t->HasAuraType(SPELL_AURA_SPELL_MAGNET))
+                                cast = true;
                         }
                     }
                 }
@@ -985,15 +954,15 @@ public:
 
         void UpdateAI(uint32 diff) override
         {
-            CheckShamanisticRage(diff);
-            CheckThunderStorm(diff);
-
             if (!GlobalUpdate(diff))
                 return;
 
             DoVehicleActions(diff);
             if (!CanBotAttackOnVehicle())
                 return;
+
+            CheckShamanisticRage(diff);
+            CheckThunderStorm(diff);
 
             CheckHexy(diff);
             CheckEarthy(diff);
@@ -1010,6 +979,7 @@ public:
 
             CheckBloodlust(diff);
             BuffAndHealGroup(diff);
+            CheckEarthShield(diff);
             CureGroup(CURE_TOXINS, diff);
             CheckTotems(diff);
             CheckShield(diff);
@@ -1037,31 +1007,40 @@ public:
             if (IsCasting())
                 return;
 
+            CheckUsableItems(diff);
+
             DoNormalAttack(diff);
         }
 
         void DoNormalAttack(uint32 diff)
         {
-            StartAttack(opponent, IsMelee());
-
-            if (!CanAffectVictim(SPELL_SCHOOL_MASK_FIRE|SPELL_SCHOOL_MASK_NATURE))
+            Unit* mytar = opponent ? opponent : disttarget ? disttarget : nullptr;
+            if (!mytar)
                 return;
+
+            StartAttack(mytar, IsMelee());
+
+            CheckAttackState();
+            if (!me->IsAlive() || !mytar->IsAlive())
+                return;
+
+            auto [can_do_frost, can_do_fire, can_do_nature] = CanAffectVictimBools(mytar, SPELL_SCHOOL_FROST, SPELL_SCHOOL_FIRE, SPELL_SCHOOL_NATURE);
 
             //AttackerSet m_attackers = master->getAttackers();
             //AttackerSet b_attackers = me->getAttackers();
-            float dist = me->GetDistance(opponent);
+            float dist = me->GetDistance(mytar);
 
             //spell reflections
-            if (IsSpellReady(EARTH_SHOCK_1, diff) && HasRole(BOT_ROLE_DPS) && dist < 25 && CanRemoveReflectSpells(opponent, EARTH_SHOCK_1) &&
-                doCast(opponent, EARTH_SHOCK_1))
+            if (IsSpellReady(EARTH_SHOCK_1, diff) && can_do_nature && HasRole(BOT_ROLE_DPS) && dist < 25 && CanRemoveReflectSpells(mytar, EARTH_SHOCK_1) &&
+                doCast(mytar, EARTH_SHOCK_1))
                 return;
 
-            MoveBehind(opponent);
+            MoveBehind(mytar);
 
             //STORMSTRIKE
-            if (IsSpellReady(STORMSTRIKE_1, diff) && HasRole(BOT_ROLE_DPS) && IsMelee() && dist <= 5 && Rand() < 120)
+            if (IsSpellReady(STORMSTRIKE_1, diff) && can_do_nature && HasRole(BOT_ROLE_DPS) && IsMelee() && dist <= 5 && Rand() < 120)
             {
-                if (doCast(opponent, GetSpell(STORMSTRIKE_1)))
+                if (doCast(mytar, GetSpell(STORMSTRIKE_1)))
                     return;
             }
             //SHOCKS
@@ -1069,23 +1048,23 @@ public:
                 (GetSpell(FLAME_SHOCK_1) || GetSpell(EARTH_SHOCK_1) || GetSpell(FROST_SHOCK_1)) &&
                 dist < 25 && Rand() < 70)
             {
-                if (GetSpell(FLAME_SHOCK_1))
+                if (GetSpell(FLAME_SHOCK_1) && can_do_fire)
                 {
-                    AuraEffect const* fsh = opponent->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_SHAMAN, 0x10000000, 0x0, 0x0, me->GetGUID());
+                    AuraEffect const* fsh = mytar->GetAuraEffect(SPELL_AURA_PERIODIC_DAMAGE, SPELLFAMILY_SHAMAN, 0x10000000, 0x0, 0x0, me->GetGUID());
                     if (!fsh || fsh->GetBase()->GetDuration() < 3000)
                     {
-                        if (doCast(opponent, GetSpell(FLAME_SHOCK_1)))
+                        if (doCast(mytar, GetSpell(FLAME_SHOCK_1)))
                             return;
                     }
                 }
 
-                uint32 SHOCK = GetSpell(FROST_SHOCK_1);
-                if (!SHOCK)
+                uint32 SHOCK = can_do_frost ? GetSpell(FROST_SHOCK_1) : 0;
+                if (!SHOCK && can_do_nature)
                     SHOCK = GetSpell(EARTH_SHOCK_1);
 
                 if (SHOCK)
                 {
-                    if (doCast(opponent, SHOCK))
+                    if (doCast(mytar, SHOCK))
                         return;
                 }
             }
@@ -1093,36 +1072,37 @@ public:
             //Feral Spirit
             if (IsSpellReady(FERAL_SPIRIT_1, diff) && HasRole(BOT_ROLE_DPS) && Rand() < 40 && dist < 5)
             {
-                SummonBotPet(opponent);
+                SummonBotPet(mytar);
                 SetSpellCooldown(FERAL_SPIRIT_1, 180000);
                 return;
             }
 
             //LAVA BURST
-            if (IsSpellReady(LAVA_BURST_1, diff) && _spec == BOT_SPEC_SHAMAN_ELEMENTAL &&
-                HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(LAVA_BURST_1) && Rand() < 60 &&
+            if (IsSpellReady(LAVA_BURST_1, diff) && can_do_fire && HasRole(BOT_ROLE_DPS) &&
+                (GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL || (IsRanged() && (!can_do_nature || !GetSpell(LIGHTNING_BOLT_1)))) &&
+                dist < CalcSpellMaxRange(LAVA_BURST_1) && Rand() < 60 &&
                 (me->getAttackers().empty() || dist > 10))
             {
-                if (doCast(opponent, GetSpell(LAVA_BURST_1)))
+                if (doCast(mytar, GetSpell(LAVA_BURST_1)))
                     return;
             }
 
-            if (((MaelstromCount < 5 || MaelstromTimer == 0) && IsMelee()) ||
+            if (((MaelstromCount < 5 || MaelstromTimer == 0 || me->GetLevel() < 55) && IsMelee()) ||
                 (HasRole(BOT_ROLE_HEAL) && GetManaPCT(me) < 25))
                 return;
 
             //CHAIN LIGHTNING
-            if (IsSpellReady(CHAIN_LIGHTNING_1, diff) && HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(CHAIN_LIGHTNING_1) && Rand() < 80)
+            if (IsSpellReady(CHAIN_LIGHTNING_1, diff) && can_do_nature && HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(CHAIN_LIGHTNING_1) && Rand() < 80)
             {
-                Unit* u = FindSplashTarget(35.f, opponent, 5.f);
-                if (u && doCast(opponent, GetSpell(CHAIN_LIGHTNING_1)))
+                Unit* u = FindSplashTarget(35.f, mytar, 5.f);
+                if (u && doCast(mytar, GetSpell(CHAIN_LIGHTNING_1)))
                     return;
             }
             //LIGHTNING BOLT
-            if (IsSpellReady(LIGHTNING_BOLT_1, diff) && HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(LIGHTNING_BOLT_1))
+            if (IsSpellReady(LIGHTNING_BOLT_1, diff) && can_do_nature && HasRole(BOT_ROLE_DPS) && dist < CalcSpellMaxRange(LIGHTNING_BOLT_1))
             {
                 uint32 LIGHTNING_BOLT = GetSpell(LIGHTNING_BOLT_1);
-                if (doCast(opponent, LIGHTNING_BOLT))
+                if (doCast(mytar, LIGHTNING_BOLT))
                     return;
             }
         }
@@ -1136,16 +1116,16 @@ public:
             Hexy = FindAffectedTarget(GetSpell(HEX_1), me->GetGUID());
         }
 
-        void CheckHex(uint32 /*diff*/)
+        void CheckHex(uint32 diff)
         {
-            //if (Hexy || !IsSpellReady(HEX_1, diff))
-            //    return;
+            if (Hexy || !IsSpellReady(HEX_1, diff))
+                return;
 
-            //if (Unit* target = FindPolyTarget(20))
-            //{
-            //    if (doCast(target, GetSpell(HEX_1)))
-            //        return;
-            //}
+            if (Unit* target = FindPolyTarget(20))
+            {
+                if (doCast(target, GetSpell(HEX_1)))
+                    return;
+            }
         }
 
         void CheckEarthy(uint32 diff)
@@ -1160,9 +1140,25 @@ public:
 
         void CheckGhostWolf(uint32 diff)
         {
-            if (!IsSpellReady(GHOST_WOLF_1, diff) || !HasBotCommandState(BOT_COMMAND_FOLLOW) || Rand() > 15 ||
-                me->GetShapeshiftForm() == FORM_GHOSTWOLF || me->GetVictim() || me->IsMounted() || IAmFree())
+            if (!IsSpellReady(GHOST_WOLF_1, diff) || (!IAmFree() && !HasBotCommandState(BOT_COMMAND_FOLLOW)) ||
+                Rand() > 35 || me->GetShapeshiftForm() != FORM_NONE || me->IsMounted() || !IsOutdoors() || IsCasting())
                 return;
+
+            if (IAmFree())
+            {
+                InstanceTemplate const* instt = sObjectMgr->GetInstanceTemplate(me->GetMap()->GetId());
+                bool map_allows_mount = (!me->GetMap()->IsDungeon() || me->GetMap()->IsBattlegroundOrArena()) && (!instt || instt->AllowMount);
+                if (me->HasUnitMovementFlag(MOVEMENTFLAG_FORWARD) &&
+                    (!me->GetVictim() ?
+                        (me->IsInCombat() || !map_allows_mount || IsFlagCarrier(me)) :
+                        !me->IsWithinDist(me->GetVictim(), 8.0f + (IsMelee() ? 5.0f : GetSpellAttackRange(true)))))
+                {
+                    if (doCast(me, GetSpell(GHOST_WOLF_1)))
+                        return;
+                }
+
+                return;
+            }
 
             if (me->GetExactDist2d(master) > std::max<uint8>(master->GetBotMgr()->GetBotFollowDist(), 30))
             {
@@ -1176,24 +1172,12 @@ public:
             if (GC_Timer > diff || me->IsMounted() || IsCasting() || Rand() > 25)
                 return;
 
-            RezGroup(GetSpell(ANCESTRAL_SPIRIT_1));
+            ResurrectGroup(GetSpell(ANCESTRAL_SPIRIT_1));
 
             if (mhEnchantExpireTimer > 0 && mhEnchantExpireTimer <= diff)
-            {
-                uint8 slot = TEMP_ENCHANTMENT_SLOT;
-                if (Item* mh = GetEquips(BOT_SLOT_MAINHAND))
-                    if (mh->GetEnchantmentId(EnchantmentSlot(slot)))
-                        for (uint8 i = 0; i != MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
-                            mh->SetUInt32Value(ITEM_FIELD_ENCHANTMENT_1_1 + slot*MAX_ENCHANTMENT_OFFSET + i, 0);
-            }
+                RemoveItemClassEnchantment(BOT_SLOT_MAINHAND);
             if (ohEnchantExpireTimer > 0 && ohEnchantExpireTimer <= diff)
-            {
-                uint8 slot = TEMP_ENCHANTMENT_SLOT;
-                if (Item* oh = GetEquips(BOT_SLOT_OFFHAND))
-                    if (oh->GetEnchantmentId(EnchantmentSlot(slot)))
-                        for (uint8 i = 0; i != MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
-                            oh->SetUInt32Value(ITEM_FIELD_ENCHANTMENT_1_1 + slot*MAX_ENCHANTMENT_OFFSET + i, 0);
-            }
+                RemoveItemClassEnchantment(BOT_SLOT_OFFHAND);
 
             // Weapon Enchants
             if (me->isMoving())
@@ -1264,17 +1248,8 @@ public:
 
         bool BuffTarget(Unit* target, uint32 /*diff*/) override
         {
-            if (GetSpell(EARTH_SHIELD_1) && Earthy == false && IsTank(target) && (target == me || !IsTank()) &&
-                (target->IsInCombat() || !target->isMoving()) && Rand() < 35)
-            {
-                AuraEffect const* eShield = target->GetAuraEffect(SPELL_AURA_REDUCE_PUSHBACK, SPELLFAMILY_SHAMAN, 0x0, 0x400, 0x0);
-                bool cast = (!eShield || eShield->GetBase()->GetCharges() < 5 || eShield->GetBase()->GetDuration() < 30000);
-
-                if (cast && doCast(target, GetSpell(EARTH_SHIELD_1)))
-                    return true;
-            }
-
-            if (me->IsInCombat() && !master->GetMap()->IsRaid()) return false;
+            if (me->IsInCombat() && !master->GetMap()->IsRaid())
+                return false;
 
             if (target->HasUnitMovementFlag(MOVEMENTFLAG_SWIMMING))
             {
@@ -1296,6 +1271,59 @@ public:
                 }
             }
             return false;
+        }
+
+        void CheckEarthShield(uint32 diff)
+        {
+            if (!IsSpellReady(EARTH_SHIELD_1, diff) || Earthy == true || Rand() > (65 - 45 * me->IsInCombat()))
+                return;
+
+            static const auto can_affect = [](WorldObject const* o, Unit const* unit)
+            {
+                if (!unit->IsAlive())
+                    return false;
+                AuraEffect const* eShield = unit->GetAuraEffect(SPELL_AURA_REDUCE_PUSHBACK, SPELLFAMILY_SHAMAN, 0x0, 0x400, 0x0);
+                return (!eShield || eShield->GetBase()->GetCharges() < 5 || eShield->GetBase()->GetDuration() < 30000) && o->GetDistance(unit) < 40 && (unit->IsInCombat() || !unit->isMoving());
+            };
+
+            Group const* gr = !IAmFree() ? master->GetGroup() : GetGroup();
+            if (!gr)
+            {
+                if (IsTank(master) && can_affect(me, master) && doCast(master, GetSpell(EARTH_SHIELD_1)))
+                    return;
+
+                if (!IAmFree())
+                {
+                    BotMap const* map = master->GetBotMgr()->GetBotMap();
+                    for (BotMap::const_iterator it = map->begin(); it != map->end(); ++it)
+                    {
+                        Unit* u = it->second;
+                        if (!u || !u->IsInWorld() || me->GetMap() != u->FindMap() || !u->InSamePhase(me))
+                            continue;
+                        if (IsTank(u) && can_affect(me, u) && doCast(u, GetSpell(EARTH_SHIELD_1)))
+                            return;
+                    }
+                }
+            }
+            else
+            {
+                std::set<Unit*> tanks;
+                for (Unit* member : BotMgr::GetAllGroupMembers(gr))
+                {
+                    if (me->GetMap() == member->FindMap() && member->IsAlive() && member->InSamePhase(me) && IsTank(member) && can_affect(me, member))
+                        tanks.insert(member);
+                }
+
+                if (!tanks.empty())
+                {
+                    Unit* target = tanks.size() == 1 ? *tanks.begin() : Bcore::Containers::SelectRandomContainerElement(tanks);
+                    if (doCast(target, GetSpell(EARTH_SHIELD_1)))
+                        return;
+                }
+            }
+
+            if (!IAmFree() && can_affect(me, master) && doCast(master, GetSpell(EARTH_SHIELD_1)))
+                return;
         }
 
         void CheckDispel(uint32 diff)
@@ -1330,6 +1358,8 @@ public:
             if (!target || !target->IsAlive() || target->GetShapeshiftForm() == FORM_SPIRITOFREDEMPTION || me->GetDistance(target) > 40)
                 return false;
             uint8 hp = GetHealthPCT(target);
+            if (hp > GetHealHpPctThreshold())
+                return false;
             bool pointed = IsPointedHealTarget(target);
             if (hp > 90 && !(pointed && me->GetMap()->IsRaid()) &&
                 (!target->IsInCombat() || target->getAttackers().empty() || !IsTank(target) || !me->GetMap()->IsRaid()))
@@ -1375,7 +1405,7 @@ public:
                 if (doCast(target, GetSpell(RIPTIDE_1)))
                     return true;
             }
-            if (IsSpellReady(CHAIN_HEAL_1, diff) && xppct > 35 && xphploss > _heals[CHAIN_HEAL_1] &&
+            if (IsSpellReady(CHAIN_HEAL_1, diff) && !IAmFree() && xppct > 35 && xphploss > _heals[CHAIN_HEAL_1] &&
                 (!tanking || Rand() < 60 || target->GetAuraEffect(SPELL_AURA_PERIODIC_HEAL, SPELLFAMILY_SHAMAN, 0x0, 0x0, 0x10, me->GetGUID())))
             {
                 if (doCast(target, GetSpell(CHAIN_HEAL_1)))
@@ -1400,7 +1430,7 @@ public:
             uint8 lvl = me->GetLevel();
 
             //Call of Thunder: 5% additional critical chance for Lightning Bolt, Chain Lightning and Thunderstorm
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 30 &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 30 &&
                 (spellId == GetSpell(LIGHTNING_BOLT_1) ||
                 spellId == GetSpell(CHAIN_LIGHTNING_1) ||
                 spellId == GetSpell(THUNDERSTORM_1)))
@@ -1409,17 +1439,17 @@ public:
             if (lvl >= 25 && (SPELL_SCHOOL_MASK_NATURE & schoolMask))
                 crit_chance += 5.f;
             //Blessing of the Eternals: 4% additional critical chance for all spells
-            if ((_spec == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 45)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 45)
                 crit_chance += 4.f;
             //Tidal Waves (Lesser Healing Wave crit)
             if (spellInfo->SpellFamilyFlags[0] & 0x80)
                 if (AuraEffect const* eff = me->GetAuraEffect(TIDAL_WAVES_BUFF, 1, me->GetGUID()))
-                    if (eff->IsAffectedOnSpell(spellInfo))
+                    if (eff->IsAffectingSpell(spellInfo))
                         crit_chance += 25.f;
             //Tidal Force
             if (spellInfo->SpellFamilyFlags[0] & 0x1C0)
                 if (AuraEffect const* eff = me->GetAuraEffect(TIDAL_FORCE_BUFF, 0, me->GetGUID()))
-                    if (eff->IsAffectedOnSpell(spellInfo))
+                    if (eff->IsAffectingSpell(spellInfo))
                         crit_chance += 20.f * eff->GetBase()->GetStackAmount();
         }
 
@@ -1469,7 +1499,7 @@ public:
                     (spellInfo->GetSchoolMask() & (SPELL_SCHOOL_MASK_NATURE|SPELL_SCHOOL_MASK_FIRE|SPELL_SCHOOL_MASK_FROST)))
                     pctbonus += 0.333f;
                 //Lava Flows (part 1): 24% additional crit damage bonus for Lava Burst
-                if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 50 && spellId == GetSpell(LAVA_BURST_1))
+                if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 50 && spellId == GetSpell(LAVA_BURST_1))
                     pctbonus += 0.16f;
             }
             //Concussion: 5% bonus damage for Lightning Bolt, Chain Lightning, Thunderstorm, Lava Burst and Shocks
@@ -1486,10 +1516,10 @@ public:
             if (lvl >= 15 && spellId == GetSpell(LAVA_BURST_1))
                 pctbonus += 0.06f;
             //Storm, Earth and fire (part 3): 60% bonus damage for Flame Shock (periodic damage in fact but who cares?)
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 40 && spellId == GetSpell(FLAME_SHOCK_1))
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 40 && spellId == GetSpell(FLAME_SHOCK_1))
                 pctbonus += 0.6f;
             //Booming Echoes (part 2): 20% bonus damage for Flame Shock and Frost Shock (direct damage)
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 45 &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 45 &&
                 (spellId == GetSpell(FLAME_SHOCK_1) ||
                 spellId == GetSpell(FROST_SHOCK_1)))
                 pctbonus += 0.2f;
@@ -1497,7 +1527,7 @@ public:
             if (lvl >= 15 && spellInfo->IsRankOf(sSpellMgr->GetSpellInfo(LIGHTNING_SHIELD_DAMAGE_1)))
                 pctbonus += 0.15f;
             //Shamanism: +20/25% bonus from spp
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 45)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 45)
             {
                 if (spellId == GetSpell(CHAIN_LIGHTNING_1) || spellId == GetSpell(LIGHTNING_BOLT_1))
                     flat_mod += me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC) * 0.2f * me->CalculateDefaultCoefficient(spellInfo, SPELL_DIRECT_DAMAGE) * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo);
@@ -1505,7 +1535,7 @@ public:
                     flat_mod += me->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC) * 0.25f * me->CalculateDefaultCoefficient(spellInfo, SPELL_DIRECT_DAMAGE) * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo);
             }
             //Elemental Oath (part 1): 10% bonus damage
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) &&
                 lvl >= 45 && me->GetAuraEffect(ELEMENTAL_FOCUS_BUFF, 0, me->GetGUID()))
                 pctbonus += 0.1f;
             //Elemental Weapons (part 1): 40% bonus damage
@@ -1527,26 +1557,26 @@ public:
             float flat_mod = 0.0f;
 
             //Healing Way: 25% bonus healing for Healing Wave
-            if ((_spec == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 30 && spellId == GetSpell(HEALING_WAVE_1))
+            if ((GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 30 && spellId == GetSpell(HEALING_WAVE_1))
                 pctbonus += 0.25f;
             //Purification: 10% bonus healing for all spells
-            if ((_spec == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 35)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 35)
                 pctbonus += 0.1f;
             //Nature's Blessing: 15% of Intellect to healing
-            if ((_spec == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 45)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 45)
                 flat_mod += GetTotalBotStat(BOT_STAT_MOD_INTELLECT) * 0.15f * me->CalculateDefaultCoefficient(spellInfo, damagetype) * stack * 1.88f * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo) * stack;
             //Improved Chain Heal: 20% bonus healing for Chain Heal
-            if ((_spec == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 45 && spellId == GetSpell(CHAIN_HEAL_1))
+            if ((GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 45 && spellId == GetSpell(CHAIN_HEAL_1))
                 pctbonus += 0.2f;
             //Improved Earth Shield: 10% bonus healing for Earth Shield
             //Glyph of Earth Shield: 20% bonus healing for Earth Shield
             if (lvl >= 50 && spellId == EARTH_SHIELD_HEAL)
-                pctbonus += (_spec == BOT_SPEC_SHAMAN_RESTORATION) ? 0.3f : 0.2f;
+                pctbonus += (GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) ? 0.3f : 0.2f;
             //Improved Shields (part 3): 15% bonus healing for Earth Shield
             if (lvl >= 15 && spellId == EARTH_SHIELD_HEAL)
                 pctbonus += 0.15f;
             //Tidal Waves (part 2): 20% bonus (from spellpower) for Healing Wave and 10% bonus (from spellpower) for Lesser Healing Wave
-            if ((_spec == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 55)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_RESTORATION) && lvl >= 55)
             {
                 if (spellId == GetSpell(HEALING_WAVE_1))
                     flat_mod += me->SpellBaseHealingBonusDone(SPELL_SCHOOL_MASK_MAGIC) * 0.2f * me->CalculateDefaultCoefficient(spellInfo, damagetype) * 1.88f * me->CalculateSpellpowerCoefficientLevelPenalty(spellInfo) * stack;
@@ -1569,7 +1599,7 @@ public:
             //percent mods
             //Clearcasting: -40% mana cost
             if (AuraEffect const* eff = me->GetAuraEffect(ELEMENTAL_FOCUS_BUFF, 0, me->GetGUID()))
-                if (eff->IsAffectedOnSpell(spellInfo))
+                if (eff->IsAffectingSpell(spellInfo))
                     pctbonus += 0.4f;
             //Convection
             if (lvl >= 10 && ((spellInfo->SpellFamilyFlags[0] & 0x90100003) || (spellInfo->SpellFamilyFlags[1] & 0x8001000)))
@@ -1578,7 +1608,7 @@ public:
             if (lvl >= 20 && (spellInfo->SpellFamilyFlags[0] & 0x90100000))
                 pctbonus += 0.45f;
             //Mental Quickness:
-            if ((_spec == BOT_SPEC_SHAMAN_ENHANCEMENT) && lvl >= 50 && !spellInfo->CalcCastTime())
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ENHANCEMENT) && lvl >= 50 && !spellInfo->CalcCastTime())
                 pctbonus += 0.06f;
             //Totemic Focus:
             if (lvl >= 10 && (spellInfo->AttributesEx7 & SPELL_ATTR7_SUMMON_PLAYER_TOTEM))
@@ -1612,7 +1642,7 @@ public:
             //100% mods
             //Nature's Swiftness: -100% cast time
             if (AuraEffect const* eff = me->GetAuraEffect(NATURES_SWIFTNESS_1, 0, me->GetGUID()))
-                if (eff->IsAffectedOnSpell(spellInfo))
+                if (eff->IsAffectingSpell(spellInfo))
                     pctbonus += 1.0f;
 
             //pct mods
@@ -1630,7 +1660,7 @@ public:
             //Tidal Waves (Healing Wave cast time)
             if (spellInfo->SpellFamilyFlags[0] & 0x40)
                 if (AuraEffect const* eff = me->GetAuraEffect(TIDAL_WAVES_BUFF, 0, me->GetGUID()))
-                    if (eff->IsAffectedOnSpell(spellInfo))
+                    if (eff->IsAffectingSpell(spellInfo))
                         pctbonus += 0.3f;
 
             //flat mods
@@ -1641,7 +1671,7 @@ public:
             if (lvl >= 10 && spellId == GetSpell(HEALING_WAVE_1))
                 timebonus += 500;
             //Lightning Mastery: -0.5 sec
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) &&
                 lvl >= 35 && ((spellInfo->SpellFamilyFlags[0] & 0x3) || (spellInfo->SpellFamilyFlags[1] & 0x1000)))
                 timebonus += 500;
             //Stormcaller Chain Heal Bonus (26122): -0.4 sec
@@ -1649,6 +1679,31 @@ public:
                 timebonus += 400;
 
             casttime = std::max<int32>((float(casttime) * (1.0f - pctbonus)) - timebonus, 0);
+        }
+
+        void ApplyClassSpellNotLoseCastTimeMods(SpellInfo const* spellInfo, int32& delayReduce) const override
+        {
+            uint32 baseId = spellInfo->GetFirstRankSpell()->Id;
+            //SpellSchoolMask schools = spellInfo->GetSchoolMask();
+            uint8 lvl = me->GetLevel();
+            int32 reduceBonus = 0;
+
+            if (lvl >= 20 && (baseId == HEALING_WAVE_1 || baseId == LESSER_HEALING_WAVE_1 || baseId == CHAIN_HEAL_1))
+                reduceBonus += 70;
+
+            if (GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL && lvl >= 25)
+            {
+                switch (baseId)
+                {
+                    case LIGHTNING_BOLT_1: case CHAIN_LIGHTNING_1: case LAVA_BURST_1: case HEX_1:
+                        reduceBonus += 70;
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            delayReduce += reduceBonus;
         }
 
         void ApplyClassSpellCooldownMods(SpellInfo const* spellInfo, uint32& cooldown) const override
@@ -1670,13 +1725,13 @@ public:
             if (lvl >= 20 && ((spellInfo->SpellFamilyFlags[0] & 0x90100000) || (spellInfo->SpellFamilyFlags[1] & 0x8000000)))
                 timebonus += 1000;
             //Booming Echoes (part 1)
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 45 && (spellInfo->SpellFamilyFlags[0] & 0x90000000))
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 45 && (spellInfo->SpellFamilyFlags[0] & 0x90000000))
                 timebonus += 2000;
             //Storm, Earth and Fire (part 1)
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 40 && (spellInfo->SpellFamilyFlags[0] & 0x2))
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 40 && (spellInfo->SpellFamilyFlags[0] & 0x2))
                 timebonus += 2500;
             //Improved Fire Nova (part 2)
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 25 && (spellInfo->SpellFamilyFlags[0] & 0x8000000))
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && lvl >= 25 && (spellInfo->SpellFamilyFlags[0] & 0x8000000))
                 timebonus += 4000;
 
             cooldown = std::max<int32>((float(cooldown) * (1.0f - pctbonus)) - timebonus, 0);
@@ -1729,11 +1784,11 @@ public:
 
             //flat mods
             //Elemental Reach part 1: +6 yd
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) &&
                 lvl >= 30 && ((spellInfo->SpellFamilyFlags[0] & 0x8000003) || (spellInfo->SpellFamilyFlags[1] & 0x1000)))
                 flatbonus += 6.f;
             //Elemental Reach part 2: +15 yd
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) &&
                 lvl >= 30 && (spellInfo->SpellFamilyFlags[0] & 0x10000000))
                 flatbonus += 15.f;
 
@@ -1784,31 +1839,31 @@ public:
 
             //Handle Clearcasting
             if (AuraEffect* eff = me->GetAuraEffect(ELEMENTAL_FOCUS_BUFF, 0, me->GetGUID()))
-                if (eff->IsAffectedOnSpell(spellInfo))
+                if (eff->IsAffectingSpell(spellInfo))
                     eff->GetBase()->DropCharge();
             //Handle Tidal Focus
             //Healing Wave (cast time): if full Maelstrom than don't use up charge
             if (MaelstromCount < 5 && (spellInfo->SpellFamilyFlags[0] & 0x40))
                 if (AuraEffect* eff = me->GetAuraEffect(TIDAL_WAVES_BUFF, 0, me->GetGUID()))
-                    if (eff->IsAffectedOnSpell(spellInfo))
+                    if (eff->IsAffectingSpell(spellInfo))
                         eff->GetBase()->DropCharge();
             //Lesser Healing Wave (crit)
             if (spellInfo->SpellFamilyFlags[0] & 0x80)
                 if (AuraEffect* eff = me->GetAuraEffect(TIDAL_WAVES_BUFF, 1, me->GetGUID()))
-                    if (eff->IsAffectedOnSpell(spellInfo))
+                    if (eff->IsAffectingSpell(spellInfo))
                         eff->GetBase()->DropCharge();
 
             //Nature's Swiftness
             if (AuraEffect const* eff = me->GetAuraEffect(NATURES_SWIFTNESS_1, 0, me->GetGUID()))
             {
-                if (eff->IsAffectedOnSpell(spellInfo))
+                if (eff->IsAffectingSpell(spellInfo))
                     me->RemoveAurasDueToSpell(NATURES_SWIFTNESS_1);
             }
 
             //Tidal Force: Handled in Unit::HandleDummyAuraProc(): case 55166:
             //if (spellInfo->SpellFamilyFlags[0] & 0x1C0)
             //    if (AuraEffect const* eff = me->GetAuraEffect(TIDAL_FORCE_BUFF, 0, me->GetGUID()))
-            //        if (eff->IsAffectedOnSpell(spellInfo))
+            //        if (eff->IsAffectingSpell(spellInfo))
             //            me->RemoveAuraFromStack(TIDAL_FORCE_BUFF);
 
             //Shield cd
@@ -1909,7 +1964,7 @@ public:
                 item->SetUInt32Value(ITEM_FIELD_ENCHANTMENT_1_1 + slot*MAX_ENCHANTMENT_OFFSET + ENCHANTMENT_ID_OFFSET, enchant_id);
                 item->SetUInt32Value(ITEM_FIELD_ENCHANTMENT_1_1 + slot*MAX_ENCHANTMENT_OFFSET + ENCHANTMENT_DURATION_OFFSET, duration);
                 item->SetUInt32Value(ITEM_FIELD_ENCHANTMENT_1_1 + slot*MAX_ENCHANTMENT_OFFSET + ENCHANTMENT_CHARGES_OFFSET, charges);
-                ApplyItemBonuses(itemSlot); //RemoveItemBonuses inside
+                ApplyItemEnchantment(item, TEMP_ENCHANTMENT_SLOT, itemSlot);
                 if (itemSlot == BOT_SLOT_MAINHAND)
                     mhEnchantExpireTimer = ITEM_ENCHANTMENT_EXPIRE_TIMER;
                 else if (itemSlot == BOT_SLOT_OFFHAND)
@@ -1957,14 +2012,14 @@ public:
             }
 
             //Earthen Power part 2
-            if ((_spec == BOT_SPEC_SHAMAN_ENHANCEMENT) && me->GetLevel() >= 50 && baseId == EARTH_SHOCK_1)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ENHANCEMENT) && me->GetLevel() >= 50 && baseId == EARTH_SHOCK_1)
             {
                 if (AuraEffect* eff = target->GetAuraEffect(spellId, 0, me->GetGUID()))
                     eff->ChangeAmount(eff->GetAmount() * 2);
             }
 
             //Lightning Overload
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) &&
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) &&
                 me->GetLevel() >= 45 && (baseId == LIGHTNING_BOLT_1 || baseId == CHAIN_LIGHTNING_1) &&
                 urand(1,100) <= 33)
             {
@@ -2055,8 +2110,7 @@ public:
 
         void SummonBotPet(Unit* target)
         {
-            //if (botPet)
-            //    botPet->ToTempSummon()->UnSummon();
+            UnsummonWolves();
 
             uint32 entry = BOT_PET_SPIRIT_WOLF;
 
@@ -2065,22 +2119,21 @@ public:
                 //Position pos;
 
                 //45 sec duration
-                Creature* myPet = me->SummonCreature(entry, *me, TEMPSUMMON_MANUAL_DESPAWN);
+                Creature* myPet = me->SummonCreature(entry, *me, TEMPSUMMON_CORPSE_TIMED_DESPAWN, 5s);
                 //me->GetNearPoint(myPet, pos.m_positionX, pos.m_positionY, pos.m_positionZ, 0, 2, me->GetOrientation());
                 //myPet->GetMotionMaster()->MovePoint(me->GetMapId(), pos);
-                myPet->SetCreatorGUID(master->GetGUID());
+                myPet->SetCreator(master);
                 myPet->SetOwnerGUID(me->GetGUID());
                 myPet->SetFaction(master->GetFaction());
                 myPet->SetControlledByPlayer(!IAmFree());
                 myPet->SetPvP(me->IsPvP());
-                myPet->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
                 myPet->SetByteValue(UNIT_FIELD_BYTES_2, 1, master->GetByteValue(UNIT_FIELD_BYTES_2, 1));
                 myPet->SetUInt32Value(UNIT_CREATED_BY_SPELL, FERAL_SPIRIT_1);
 
                 //botPet = myPet;
 
                 myPet->Attack(target, true);
-                if (!HasBotCommandState(BOT_COMMAND_STAY))
+                if (!HasBotCommandState(BOT_COMMAND_MASK_UNCHASE))
                     myPet->GetMotionMaster()->MoveChase(target);
             }
         }
@@ -2101,7 +2154,7 @@ public:
                 }
                 if (!found)
                 {
-                    TC_LOG_ERROR("entities.unit", "Shaman_bot:JustSummoned() wolves array is full");
+                    BOT_LOG_ERROR("entities.unit", "Shaman_bot:JustSummoned() wolves array is full");
                     ASSERT(false);
                 }
             }
@@ -2109,40 +2162,46 @@ public:
 
         void SummonedCreatureDespawn(Creature* summon) override
         {
-            //TC_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: %s's %s", me->GetName().c_str(), summon->GetName().c_str());
+            //BOT_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: {}'s {}", me->GetName(), summon->GetName());
             //if (summon == botPet)
             //    botPet = nullptr;
             if (summon->GetEntry() == BOT_PET_SPIRIT_WOLF)
             {
-                bool found = false;
+                //bool found = false;
                 for (uint8 i = 0; i != MAX_WOLVES; ++i)
                 {
                     if (_wolves[i] == summon->GetGUID())
                     {
                         _wolves[i] = ObjectGuid::Empty;
-                        found = true;
+                        //found = true;
                         break;
                     }
                 }
-                if (!found)
+                //if (!found)
+                //{
+                //    BOT_LOG_ERROR("entities.unit", "Shaman_bot:SummonedCreatureDespawn() wolf is not found in array");
+                //    ASSERT(false);
+                //}
+            }
+        }
+
+        void UnsummonWolves()
+        {
+            for (uint8 i = 0; i != MAX_WOLVES; ++i)
+            {
+                if (_wolves[i])
                 {
-                    TC_LOG_ERROR("entities.unit", "Shaman_bot:SummonedCreatureDespawn() wolf is not found in array");
-                    ASSERT(false);
+                    if (Unit* wo = ObjectAccessor::GetUnit(*me, _wolves[i]))
+                        wo->ToTempSummon()->UnSummon();
+                    else
+                        _wolves[i] = ObjectGuid::Empty;
                 }
             }
         }
 
-        void UnsummonAll() override
+        void UnsummonAll(bool /*savePets*/ = true) override
         {
-            //if (botPet)
-            //    botPet->ToTempSummon()->UnSummon();
-
-            for (uint8 i = 0; i != MAX_WOLVES; ++i)
-            {
-                if (_wolves[i])
-                    if (Unit* wo = ObjectAccessor::GetUnit(*me, _wolves[i]))
-                        wo->ToTempSummon()->UnSummon();
-            }
+            UnsummonWolves();
 
             for (uint8 i = 0; i != MAX_TOTEMS; ++i)
             {
@@ -2151,7 +2210,7 @@ public:
                     Unit* to = ObjectAccessor::GetUnit(*me, _totems[i].first);
                     if (!to)
                     {
-                        //TC_LOG_ERROR("entities.player", "%s has no totem in slot %u during remove!", me->GetName().c_str(), i);
+                        //BOT_LOG_ERROR("entities.player", "{} has no totem in slot {} during remove!", me->GetName(), i);
                         continue;
                     }
                     to->ToTotem()->UnSummon();
@@ -2163,16 +2222,16 @@ public:
         {
             if (!summon)
             {
-                TC_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot %s received NULL", me->GetName().c_str());
+                BOT_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot {} received NULL", me->GetName());
                 ASSERT(false);
-                //UnsummonAll();
+                //UnsummonAll(false);
                 return;
             }
 
             TempSummon const* totem = summon->ToTempSummon();
             if (!totem || !totem->IsTotem())
             {
-                //TC_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot %s has despawned summon %s which is not a temp summon or not a totem...", me->GetName().c_str(), summon->GetName().c_str());
+                //BOT_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot {} has despawned summon {} which is not a temp summon or not a totem...", me->GetName(), summon->GetName());
                 return;
             }
 
@@ -2184,17 +2243,17 @@ public:
                 case SUMMON_SLOT_TOTEM_WATER:   slot = T_WATER; break;
                 case SUMMON_SLOT_TOTEM_AIR:     slot = T_AIR;   break;
                 default:
-                    TC_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot %s has despawned totem %s in unknown slot %u", me->GetName().c_str(), summon->GetName().c_str(), totem->m_Properties->ID);
+                    BOT_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot {} has despawned totem {} in unknown slot {}", me->GetName(), summon->GetName(), totem->m_Properties->ID);
                     return;
             }
 
             if (_totems[slot].first == ObjectGuid::Empty)
-                TC_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot %s has despawned totem %s while not having it registered!", me->GetName().c_str(), summon->GetName().c_str());
+                BOT_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot {} has despawned totem {} while not having it registered!", me->GetName(), summon->GetName());
             else if (_totems[slot].second._type == BOT_TOTEM_NONE || _totems[slot].second._type >= BOT_TOTEM_END)
-                TC_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot %s has despawned totem %s with no type assigned!", me->GetName().c_str(), summon->GetName().c_str());
+                BOT_LOG_ERROR("entities.player", "OnBotDespawn(): Shaman bot {} has despawned totem {} with no type assigned!", me->GetName(), summon->GetName());
 
             //here we reset totem category cd (not totem spell cd) if totem is destroyed
-            //TC_LOG_ERROR("entities.player", "OnBotDespawn(): %s despawned (%s : %u)", summon->GetName().c_str(), summon->IsAlive() ? "alive" : summon->isDying() ? "justdied" : "unk", (uint32)summon->getDeathState());
+            //BOT_LOG_ERROR("entities.player", "OnBotDespawn(): {} despawned ({} : {})", summon->GetName(), summon->IsAlive() ? "alive" : summon->isDying() ? "justdied" : "unk", (uint32)summon->getDeathState());
             if (!summon->IsAlive()) // alive here means totem is being replaced or unsummoned through other means
                 TotemTimer[slot] = 0;
 
@@ -2208,7 +2267,7 @@ public:
             TempSummon const* totem = summon->ToTempSummon();
             if (!totem || !totem->IsTotem())
             {
-                //TC_LOG_ERROR("entities.player", "OnBotSummon(): Shaman bot %s has summoned creature %s which is not a temp summon or not a totem...", me->GetName().c_str(), summon->GetName().c_str());
+                //BOT_LOG_ERROR("entities.player", "OnBotSummon(): Shaman bot {} has summoned creature {} which is not a temp summon or not a totem...", me->GetName(), summon->GetName());
                 return;
             }
 
@@ -2220,7 +2279,7 @@ public:
                 case SUMMON_SLOT_TOTEM_WATER:   slot = T_WATER; break;
                 case SUMMON_SLOT_TOTEM_AIR:     slot = T_AIR;   break;
                 default:
-                    TC_LOG_ERROR("entities.player", "OnBotSummon(): Shaman bot %s has summoned totem %s with unknown type %u", me->GetName().c_str(), summon->GetName().c_str(), totem->m_Properties->ID);
+                    BOT_LOG_ERROR("entities.player", "OnBotSummon(): Shaman bot {} has summoned totem {} with unknown type {}", me->GetName(), summon->GetName(), totem->m_Properties->ID);
                     return;
             }
 
@@ -2275,7 +2334,7 @@ public:
                 case TOTEM_OF_WRATH_1:          btype = BOT_TOTEM_WRATH;                break;
                 default:
                 {
-                    TC_LOG_ERROR("scripts", "Unknown totem create spell %u!", createSpell);
+                    BOT_LOG_ERROR("scripts", "Unknown totem create spell {}!", createSpell);
                     btype = BOT_TOTEM_NONE;
                     break;
                 }
@@ -2286,18 +2345,18 @@ public:
             _totems[slot].second._type = btype;
             me->m_SummonSlot[slot+1] = _totems[slot].first; //needed for scripts handlers
 
-            //TC_LOG_ERROR("entities.player", "shaman bot: summoned %s (type %u) at x=%.2f, y=%.2f, z=%.2f",
-            //    summon->GetName().c_str(), slot + 1, _totems[slot].second.pos.GetPositionX(), _totems[slot].second.pos.GetPositionY(), _totems[slot].second.pos.GetPositionZ());
+            //BOT_LOG_ERROR("entities.player", "shaman bot: summoned {} (type {}) at x={}, y={}, z={}",
+            //    summon->GetName(), slot + 1, _totems[slot].second.pos.GetPositionX(), _totems[slot].second.pos.GetPositionY(), _totems[slot].second.pos.GetPositionZ());
 
             //TODO: gets overriden in Spell::EffectSummonType (end)
             //Without setting creator correctly it will be impossible to use summon X elemental totems
-            summon->SetCreatorGUID(me->GetGUID());
+            summon->SetCreator(me);
             summon->SetDisplayId(sObjectMgr->GetModelForTotem(SummonSlot(slot+1), Races(me->GetRace())));
             summon->SetFaction(me->GetFaction());
             summon->SetPvP(me->IsPvP());
             summon->SetOwnerGUID(master->GetGUID());
             summon->SetControlledByPlayer(!IAmFree());
-            summon->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+            //summon->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
             // totem will claim master's summon slot
             // free it to avoid conflicts with other shaman bots and master
             // if master is a shaman his totem will despawn
@@ -2308,7 +2367,7 @@ public:
             //check by btype
 
             // Storm, Earth and Fire: Earthbind totem AoE root
-            if ((_spec == BOT_SPEC_SHAMAN_ELEMENTAL) && btype == BOT_TOTEM_EARTHBIND && me->GetLevel() >= 40)
+            if ((GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL) && btype == BOT_TOTEM_EARTHBIND && me->GetLevel() >= 40)
             {
                 //master's talent will be found so do not cast earthgrab twice, instead let spell script roll the chance
                 //see spell_shaman.cpp
@@ -2330,9 +2389,9 @@ public:
                     return needChooseMHEnchant;
                 case BOTAI_MISC_ENCHANT_IS_AUTO_OH:
                     return needChooseOHEnchant;
-                case BOTAI_MISC_ENCHANT_CAN_EXPIRE_MH:
+                case BOTAI_MISC_ENCHANT_TIMER_MH:
                     return mhEnchantExpireTimer;
-                case BOTAI_MISC_ENCHANT_CAN_EXPIRE_OH:
+                case BOTAI_MISC_ENCHANT_TIMER_OH:
                     return ohEnchantExpireTimer;
                 case BOTAI_MISC_ENCHANT_CURRENT_MH:
                     return mhEnchant;
@@ -2359,30 +2418,38 @@ public:
         {
             switch (data)
             {
-                case BOTAI_MISC_ENCHANT_CAN_EXPIRE_MH:
-                    if (value)
-                        mhEnchantExpireTimer = 0;
+                case BOTAI_MISC_ENCHANT_IS_AUTO_MH:
+                    needChooseMHEnchant = bool(value);
                     break;
-                case BOTAI_MISC_ENCHANT_CAN_EXPIRE_OH:
-                    if (value)
-                        ohEnchantExpireTimer = 0;
+                case BOTAI_MISC_ENCHANT_IS_AUTO_OH:
+                    needChooseOHEnchant = bool(value);
+                    break;
+                case BOTAI_MISC_ENCHANT_TIMER_MH:
+                    if (value == 0)
+                        mhEnchantExpireTimer = value;
+                    break;
+                case BOTAI_MISC_ENCHANT_TIMER_OH:
+                    if (value == 0)
+                        ohEnchantExpireTimer = value;
                     break;
                 case BOTAI_MISC_ENCHANT_CURRENT_MH:
                     mhEnchant = value;
-                    needChooseMHEnchant = value ? false : true;
+                    SetAIMiscValue(BOTAI_MISC_ENCHANT_IS_AUTO_MH, value ? false : true);
                     break;
                 case BOTAI_MISC_ENCHANT_CURRENT_OH:
                     ohEnchant = value;
-                    needChooseOHEnchant = value ? false : true;
+                    SetAIMiscValue(BOTAI_MISC_ENCHANT_IS_AUTO_OH, value ? false : true);
                     break;
                 default:
                     break;
             }
+
+            bot_ai::SetAIMiscValue(data, value);
         }
 
         void Reset() override
         {
-            UnsummonAll();
+            UnsummonAll(false);
             for (uint8 i = 0; i != MAX_WOLVES; ++i)
                 _wolves[i] = ObjectGuid::Empty;
             for (uint8 i = 0; i != MAX_TOTEMS; ++i)
@@ -2404,15 +2471,10 @@ public:
             Earthy = false;
             maelUseUp = false;
 
-            mhEnchantExpireTimer = 1;
-            ohEnchantExpireTimer = 1;
+            mhEnchantExpireTimer = std::min<uint32>(mhEnchantExpireTimer, 1);
+            ohEnchantExpireTimer = std::min<uint32>(ohEnchantExpireTimer, 1);
 
             DefaultInit();
-
-            mhEnchant = 0;
-            ohEnchant = 0;
-            needChooseMHEnchant = true;
-            needChooseOHEnchant = true;
         }
 
         void ReduceCD(uint32 diff) override
@@ -2443,9 +2505,9 @@ public:
         void InitSpells() override
         {
             uint8 lvl = me->GetLevel();
-            bool isElem = _spec == BOT_SPEC_SHAMAN_ELEMENTAL;
-            bool isEnha = _spec == BOT_SPEC_SHAMAN_ENHANCEMENT;
-            bool isRest = _spec == BOT_SPEC_SHAMAN_RESTORATION;
+            bool isElem = GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL;
+            bool isEnha = GetSpec() == BOT_SPEC_SHAMAN_ENHANCEMENT;
+            bool isRest = GetSpec() == BOT_SPEC_SHAMAN_RESTORATION;
 
             InitSpellMap(HEALING_WAVE_1);
             InitSpellMap(CHAIN_HEAL_1);
@@ -2527,15 +2589,15 @@ public:
         void ApplyClassPassives() const override
         {
             uint8 level = master->GetLevel();
-            bool isElem = _spec == BOT_SPEC_SHAMAN_ELEMENTAL;
-            bool isEnha = _spec == BOT_SPEC_SHAMAN_ENHANCEMENT;
-            bool isRest = _spec == BOT_SPEC_SHAMAN_RESTORATION;
+            bool isElem = GetSpec() == BOT_SPEC_SHAMAN_ELEMENTAL;
+            bool isEnha = GetSpec() == BOT_SPEC_SHAMAN_ENHANCEMENT;
+            bool isRest = GetSpec() == BOT_SPEC_SHAMAN_RESTORATION;
 
             RefreshAura(ELEMENTAL_DEVASTATION3, isEnha && level >= 18 ? 1 : 0);
             RefreshAura(ELEMENTAL_DEVASTATION2, isEnha && level >= 15 && level < 18 ? 1 : 0);
             RefreshAura(ELEMENTAL_DEVASTATION1, isEnha && level >= 12 && level < 15 ? 1 : 0);
             RefreshAura(ELEMENTAL_FOCUS, isElem && level >= 20 ? 1 : 0);
-            RefreshAura(ELEMENTAL_OATH, isElem && level >= 40 ? 1 : 0);
+            RefreshAura(ELEMENTAL_OATH, !IAmFree() && isElem && level >= 40 ? 1 : 0);
             //RefreshAura(STORM_EARTH_AND_FIRE, isElem && level >= 45 ? 1 : 0);
 
             RefreshAura(TOUGHNESS, level >= 25 ? 1 : 0);
@@ -2545,7 +2607,7 @@ public:
             RefreshAura(FLURRY2, isEnha && level >= 26 && level < 27 ? 1 : 0);
             RefreshAura(FLURRY1, isEnha && level >= 25 && level < 26 ? 1 : 0);
             RefreshAura(WEAPON_MASTERY, isEnha && level >= 30 ? 1 : 0);
-            RefreshAura(UNLEASHED_RAGE, isEnha && level >= 35 ? 1 : 0);
+            RefreshAura(UNLEASHED_RAGE, !IAmFree() && isEnha && level >= 35 ? 1 : 0);
             RefreshAura(IMPROVED_STORMSTRIKE, isEnha && level >= 40 ? 1 : 0);
             RefreshAura(STATIC_SHOCK, isEnha && level >= 41 ? 1 : 0);
             RefreshAura(EARTHEN_POWER, isEnha && level >= 50 ? 1 : 0);
@@ -2724,6 +2786,8 @@ public:
         uint32 mhEnchant, ohEnchant;
         bool needChooseMHEnchant, needChooseOHEnchant;
 
+        bool canTremor;
+
         typedef std::unordered_map<uint32 /*baseId*/, int32 /*amount*/> HealMap;
         HealMap _heals;
 
@@ -2748,9 +2812,9 @@ public:
                 //    baseId = sSpellMgr->GetSpellInfo(base)->GetFirstRankSpell()->Id;
                 //if (target->GetEntry() == 70025 && cre->GetGUID() != me->GetGUID())
                 //{
-                //    TC_LOG_ERROR("spells","totemMask: unit %s, %s (%u), owner %s (crSp %u, base %u), istotem %u", target->GetName().c_str(),
+                //    BOT_LOG_ERROR("spells","totemMask: unit {}, {} ({}), owner {} (crSp {}, base {}), istotem {}", target->GetName(),
                 //        itr->second->GetBase()->GetSpellInfo()->SpellName[0], itr->second->GetBase()->GetId(),
-                //        cre ? cre->GetName().c_str() : "unk", base, baseId, uint32(cre->IsTotem()));
+                //        cre ? cre->GetName() : "unk", base, baseId, uint32(cre->IsTotem()));
                 //}
                 sumonSpell = cre ? cre->GetUInt32Value(UNIT_CREATED_BY_SPELL) : 0;
                 if (!sumonSpell || !cre->IsTotem())

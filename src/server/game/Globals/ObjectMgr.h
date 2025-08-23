@@ -34,6 +34,7 @@
 #include "SharedDefines.h"
 #include "Trainer.h"
 #include "VehicleDefines.h"
+#include "UniqueTrackablePtr.h"
 #include <iterator>
 #include <map>
 #include <unordered_map>
@@ -73,20 +74,15 @@ enum SummonerType
 struct TempSummonGroupKey
 {
     TempSummonGroupKey(uint32 summonerEntry, SummonerType summonerType, uint8 group)
-        : _summonerEntry(summonerEntry), _summonerType(summonerType), _summonGroup(group)
+        : SummonerEntry(summonerEntry), SummonerType(summonerType), SummonGroup(group)
     {
     }
 
-    bool operator<(TempSummonGroupKey const& rhs) const
-    {
-        return std::tie(_summonerEntry, _summonerType, _summonGroup) <
-            std::tie(rhs._summonerEntry, rhs._summonerType, rhs._summonGroup);
-    }
+    std::strong_ordering operator<=>(TempSummonGroupKey const& right) const = default;
 
-private:
-    uint32 _summonerEntry;      ///< Summoner's entry
-    SummonerType _summonerType; ///< Summoner's type, see SummonerType for available types
-    uint8 _summonGroup;         ///< Summon's group id
+    uint32 SummonerEntry;           ///< Summoner's entry
+    ::SummonerType SummonerType;    ///< Summoner's type, see SummonerType for available types
+    uint8 SummonGroup;              ///< Summon's group id
 };
 
 /// Stores data for temp summons
@@ -623,7 +619,6 @@ struct QuestRelationResult
                 }
 
                 bool operator==(Iterator const& other) const { return _it == other._it; }
-                bool operator!=(Iterator const& other) const { return _it != other._it; }
 
                 Iterator& operator++() { ++_it; skip(); return *this; }
                 Iterator operator++(int) { Iterator t = *this; ++*this; return t; }
@@ -966,7 +961,7 @@ class TC_GAME_API ObjectMgr
 
         static ObjectMgr* instance();
 
-        typedef std::unordered_map<uint32, Quest> QuestContainer;
+        typedef std::unordered_map<uint32, Trinity::unique_trackable_ptr<Quest>> QuestContainer;
 
         typedef std::unordered_map<uint32, AreaTrigger> AreaTriggerContainer;
 
@@ -986,7 +981,7 @@ class TC_GAME_API ObjectMgr
 
         GameObjectTemplate const* GetGameObjectTemplate(uint32 entry) const;
         GameObjectTemplateContainer const& GetGameObjectTemplates() const { return _gameObjectTemplateStore; }
-        uint32 LoadReferenceVendor(int32 vendor, int32 item_id, std::set<uint32>* skip_vendors);
+        uint32 LoadReferenceVendor(int32 vendor, int32 item, std::set<uint32>* skip_vendors);
 
         void LoadGameObjectTemplate();
         void LoadGameObjectTemplateAddons();
@@ -1079,7 +1074,7 @@ class TC_GAME_API ObjectMgr
         QuestGreeting const* GetQuestGreeting(ObjectGuid guid) const;
 
         WorldSafeLocsEntry const* GetDefaultGraveyard(uint32 team) const;
-        WorldSafeLocsEntry const* GetClosestGraveyard(float x, float y, float z, uint32 MapId, uint32 team) const;
+        WorldSafeLocsEntry const* GetClosestGraveyard(float x, float y, float z, uint32 MapId, uint32 team, WorldObject* conditionObject) const;
         bool AddGraveyardLink(uint32 id, uint32 zoneId, uint32 team, bool persist = true);
         void RemoveGraveyardLink(uint32 id, uint32 zoneId, uint32 team, bool persist = false);
         void LoadGraveyardZones();
@@ -1271,10 +1266,10 @@ class TC_GAME_API ObjectMgr
         void SetHighestGuids();
 
         template<HighGuid type>
-        inline ObjectGuidGeneratorBase& GetGenerator()
+        ObjectGuidGenerator& GetGenerator()
         {
             static_assert(ObjectGuidTraits<type>::Global, "Only global guid can be generated in ObjectMgr context");
-            return GetGuidSequenceGenerator<type>();
+            return GetGuidSequenceGenerator(type);
         }
 
         uint32 GenerateAuctionID();
@@ -1304,15 +1299,9 @@ class TC_GAME_API ObjectMgr
             return nullptr;
         }
 
-        CellObjectGuids const& GetCellObjectGuids(uint16 mapid, uint8 spawnMode, uint32 cell_id)
-        {
-            return _mapObjectGuidsStore[MAKE_PAIR32(mapid, spawnMode)][cell_id];
-        }
+        CellObjectGuids const* GetCellObjectGuids(uint16 mapid, uint8 spawnMode, uint32 cell_id);
 
-        CellObjectGuidsMap const& GetMapObjectGuids(uint16 mapid, uint8 spawnMode)
-        {
-            return _mapObjectGuidsStore[MAKE_PAIR32(mapid, spawnMode)];
-        }
+        CellObjectGuidsMap const* GetMapObjectGuids(uint16 mapid, uint8 spawnMode);
 
         /**
          * Gets temp summon data for all creatures of specified group.
@@ -1519,7 +1508,7 @@ class TC_GAME_API ObjectMgr
         }
         void AddVendorItem(uint32 entry, uint32 item, int32 maxcount, uint32 incrtime, uint32 extendedCost, bool persist = true); // for event
         bool RemoveVendorItem(uint32 entry, uint32 item, bool persist = true); // for event
-        bool IsVendorItemValid(uint32 vendor_entry, uint32 item, int32 maxcount, uint32 ptime, uint32 ExtendedCost, Player* player = nullptr, std::set<uint32>* skip_vendors = nullptr, uint32 ORnpcflag = 0) const;
+        bool IsVendorItemValid(uint32 vendor_entry, uint32 id, int32 maxcount, uint32 ptime, uint32 ExtendedCost, Player* player = nullptr, std::set<uint32>* skip_vendors = nullptr, uint32 ORnpcflag = 0) const;
 
         void LoadScriptNames();
         ScriptNameContainer const& GetAllScriptNames() const;
@@ -1603,17 +1592,9 @@ class TC_GAME_API ObjectMgr
         ObjectGuid::LowType _gameObjectSpawnId;
 
         // first free low guid for selected guid type
-        template<HighGuid high>
-        inline ObjectGuidGeneratorBase& GetGuidSequenceGenerator()
-        {
-            auto itr = _guidGenerators.find(high);
-            if (itr == _guidGenerators.end())
-                itr = _guidGenerators.insert(std::make_pair(high, std::unique_ptr<ObjectGuidGenerator<high>>(new ObjectGuidGenerator<high>()))).first;
+        ObjectGuidGenerator& GetGuidSequenceGenerator(HighGuid high);
 
-            return *itr->second;
-        }
-
-        std::map<HighGuid, std::unique_ptr<ObjectGuidGeneratorBase>> _guidGenerators;
+        std::map<HighGuid, std::unique_ptr<ObjectGuidGenerator>> _guidGenerators;
         QuestContainer _questTemplates;
 
         typedef std::unordered_map<uint32, GossipText> GossipTextContainer;

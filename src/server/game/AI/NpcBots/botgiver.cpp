@@ -1,8 +1,11 @@
 #include "bot_ai.h"
 #include "botcommon.h"
 #include "botdatamgr.h"
+#include "botgossip.h"
 #include "botspell.h"
+#include "bottext.h"
 #include "botmgr.h"
+#include "Chat.h"
 #include "Creature.h"
 #include "Log.h"
 #include "Player.h"
@@ -16,9 +19,6 @@ Complete - 100%
 #define HIRE GOSSIP_SENDER_BOTGIVER_HIRE
 #define HIRE_CLASS GOSSIP_SENDER_BOTGIVER_HIRE_CLASS
 #define HIRE_ENTRY GOSSIP_SENDER_BOTGIVER_HIRE_ENTRY
-
-typedef std::set<Creature const*> NpcBotRegistry;
-extern NpcBotRegistry _existingBots;
 
 class script_bot_giver : public CreatureScript
 {
@@ -76,15 +76,41 @@ public:
                 {
                     gossipTextId = GOSSIP_BOTGIVER_HIRE;
 
-                    if (player->GetNpcBotsCount() >= BotMgr::GetMaxNpcBots())
+                    if (player->GetNpcBotsCount() >= BotMgr::GetMaxNpcBots(player->GetLevel()))
                     {
                         WhisperTo(player, bot_ai::LocalizedNpcText(player, BOT_TEXT_BOTGIVER_TOO_MANY_BOTS).c_str());
                         break;
                     }
 
+                    if (uint32 maxBotsPerAccount = BotMgr::GetMaxAccountBots())
+                    {
+                        uint32 accountBotsCount = BotDataMgr::GetAccountBotsCount(player->GetSession()->GetAccountId());
+                        if (accountBotsCount >= maxBotsPerAccount)
+                        {
+                            ChatHandler ch(player->GetSession());
+                            ch.PSendSysMessage(bot_ai::LocalizedNpcText(player, BOT_TEXT_HIREFAIL_MAXBOTS_ACCOUNT).c_str(), accountBotsCount, maxBotsPerAccount);
+                            break;
+                        }
+                    }
+
                     subMenu = true;
 
                     uint8 availCount = 0;
+                    std::array<uint32, BOT_CLASS_END> npcbot_count_per_class{ 0 };
+
+                    {
+                        std::unique_lock<std::shared_mutex> lock(*BotDataMgr::GetLock());
+                        for (Creature const* bot : BotDataMgr::GetExistingNPCBots())
+                        {
+                            if (!bot->IsAlive() || bot->IsTempBot() || bot->IsWandererBot() || bot->GetBotAI()->GetBotOwnerGuid() || bot->HasAura(BERSERK))
+                                continue;
+                            if (BotMgr::FilterRaces() && bot->GetBotClass() < BOT_CLASS_EX_START && (bot->GetRaceMask() & RACEMASK_ALL_PLAYABLE) &&
+                                !(bot->GetRaceMask() & ((player->GetRaceMask() & RACEMASK_ALLIANCE) ? RACEMASK_ALLIANCE : RACEMASK_HORDE)))
+                                continue;
+
+                            ++npcbot_count_per_class[bot->GetBotClass()];
+                        }
+                    }
 
                     for (uint8 botclass = BOT_CLASS_WARRIOR; botclass < BOT_CLASS_END; ++botclass)
                     {
@@ -123,6 +149,7 @@ public:
                             case BOT_CLASS_DARK_RANGER: textId = BOT_TEXT_CLASS_DARK_RANGER_PLU;    break;
                             case BOT_CLASS_NECROMANCER: textId = BOT_TEXT_CLASS_NECROMANCER_PLU;    break;
                             case BOT_CLASS_SEA_WITCH:   textId = BOT_TEXT_CLASS_SEAWITCH_PLU;       break;
+                            case BOT_CLASS_CRYPT_LORD:  textId = BOT_TEXT_CLASS_CRYPT_LORD_PLU;     break;
                             default:                    textId = 0;                                 break;
                         }
 
@@ -130,7 +157,7 @@ public:
                             continue;
 
                         std::ostringstream bclass;
-                        bclass << bot_ai::LocalizedNpcText(player, textId) << " (" << BotMgr::GetNpcBotCostStr(player->GetLevel(), botclass) << ")";
+                        bclass << npcbot_count_per_class[botclass] << " " << bot_ai::LocalizedNpcText(player, textId) << " (" << BotMgr::GetNpcBotCostStr(player->GetLevel(), botclass) << ")";
 
                         AddGossipItemFor(player, GOSSIP_ICON_TALK, bclass.str(), HIRE_CLASS, GOSSIP_ACTION_INFO_DEF + botclass);
 
@@ -151,7 +178,7 @@ public:
 
                     uint8 botclass = action - GOSSIP_ACTION_INFO_DEF;
 
-                    uint32 cost = BotMgr::GetNpcBotCost(player->GetLevel(), botclass);
+                    uint32 cost = BotMgr::GetNpcBotCostHire(player->GetLevel(), botclass);
                     if (!player->HasEnoughMoney(cost))
                     {
                         WhisperTo(player, bot_ai::LocalizedNpcText(player, BOT_TEXT_HIREFAIL_COST).c_str());
@@ -163,12 +190,13 @@ public:
                     uint8 availCount = 0;
 
                     //go through bots map to find what bots are available
-                    NpcBotRegistry const& allBots = _existingBots;
+                    std::unique_lock<std::shared_mutex> lock(*BotDataMgr::GetLock());
+                    NpcBotRegistry const& allBots = BotDataMgr::GetExistingNPCBots();
                     for (NpcBotRegistry::const_iterator ci = allBots.begin(); ci != allBots.end(); ++ci)
                     {
                         Creature const* bot = *ci;
                         bot_ai const* ai = bot->GetBotAI();
-                        if (bot->GetBotClass() != botclass || !bot->IsAlive() || ai->IsTempBot() || ai->GetBotOwnerGuid() || bot->HasAura(BERSERK))
+                        if (bot->GetBotClass() != botclass || !bot->IsAlive() || ai->IsTempBot() || bot->IsWandererBot() || ai->GetBotOwnerGuid() || bot->HasAura(BERSERK))
                             continue;
                         if (BotMgr::FilterRaces() && botclass < BOT_CLASS_EX_START && (bot->GetRaceMask() & RACEMASK_ALL_PLAYABLE) &&
                             !(bot->GetRaceMask() & ((player->GetRaceMask() & RACEMASK_ALLIANCE) ? RACEMASK_ALLIANCE : RACEMASK_HORDE)))
@@ -219,15 +247,15 @@ public:
                     if (!bot)
                     {
                         //possible but still
-                        TC_LOG_ERROR("entities.unit", "HIRE_NBOT_ENTRY: bot %u not found!", entry);
+                        BOT_LOG_ERROR("entities.unit", "HIRE_NBOT_ENTRY: bot {} not found!", entry);
                         break;
                     }
 
                     bot_ai const* ai = bot->GetBotAI();
-                    if (bot->IsInCombat() || !bot->IsAlive() || bot_ai::CCed(bot) || ai->IsDuringTeleport() ||
+                    if (bot->IsInCombat() || !bot->IsAlive() || bot_ai::CCed(bot) ||
                         bot->HasUnitState(UNIT_STATE_CASTING) || ai->GetBotOwnerGuid() || bot->HasAura(BERSERK))
                     {
-                        //TC_LOG_ERROR("entities.unit", "HIRE_NBOT_ENTRY: bot %u (%s) is unavailable all of the sudden!", entry);
+                        //BOT_LOG_ERROR("entities.unit", "HIRE_NBOT_ENTRY: bot {} ({}) is unavailable all of the sudden!", entry);
                         std::ostringstream failMsg;
                         failMsg << bot->GetName() << bot_ai::LocalizedNpcText(player, BOT_TEXT_BOTGIVER__BOT_BUSY);
                         WhisperTo(player, failMsg.str().c_str());

@@ -61,7 +61,7 @@ namespace Movement
         MoveSpline& move_spline = *unit->movespline;
 
         // Elevators also use MOVEMENTFLAG_ONTRANSPORT but we do not keep track of their position changes (movementInfo.transport.guid is 0 in that case)
-        bool transport = unit->HasUnitMovementFlag(MOVEMENTFLAG_ONTRANSPORT) && unit->GetTransGUID();
+        bool transport = unit->HasUnitMovementFlag(MOVEMENTFLAG_ONTRANSPORT) && !unit->GetTransGUID().IsEmpty();
         Location real_position;
         // there is a big chance that current position is unknown if current state is not finalized, need compute it
         // this also allows CalculatePath spline position and update map position in much greater intervals
@@ -117,6 +117,11 @@ namespace Movement
             if (Creature* creature = unit->ToCreature())
                 if (creature->HasSearchedAssistance())
                     args.velocity *= 0.66f;
+
+            //npcbot: do not emit an error if unit cannot move at all
+            if ((unit->IsNPCBotOrPet() || !unit->CanFreeMove()) && !(args.velocity > 0.01f))
+                return 0;
+            //end npcbot
         }
 
         // limit the speed in the same way the client does
@@ -264,6 +269,11 @@ namespace Movement
         args.path.resize(2);
         TransportPathTransform transform(unit, args.TransformForTransport);
         args.path[1] = transform(dest);
+    }
+
+    void MoveSplineInit::SetFall()
+    {
+        args.flags.EnableFalling();
     }
 
     Vector3 TransportPathTransform::operator()(Vector3 input)

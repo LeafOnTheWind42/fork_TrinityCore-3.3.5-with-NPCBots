@@ -154,7 +154,7 @@ public:
         void KilledUnit(Unit* u) override { bot_ai::KilledUnit(u); }
         void EnterEvadeMode(EvadeReason why = EVADE_REASON_OTHER) override { bot_ai::EnterEvadeMode(why); }
         void MoveInLineOfSight(Unit* u) override { bot_ai::MoveInLineOfSight(u); }
-        void JustDied(Unit* u) override { UnsummonAll(); bot_ai::JustDied(u); }
+        void JustDied(Unit* u) override { UnsummonAll(false); bot_ai::JustDied(u); }
         void DoNonCombatActions(uint32 /*diff*/) { }
 
         void CheckAura(uint32 diff)
@@ -213,6 +213,8 @@ public:
             if (!CheckAttackTarget())
                 return;
 
+            CheckUsableItems(diff);
+
             CheckSleep(diff);
 
             Attack(diff);
@@ -220,9 +222,17 @@ public:
 
         void Attack(uint32 diff)
         {
-            StartAttack(opponent, IsMelee());
+            Unit* mytar = opponent ? opponent : disttarget ? disttarget : nullptr;
+            if (!mytar)
+                return;
 
-            MoveBehind(opponent);
+            StartAttack(mytar, IsMelee());
+
+            CheckAttackState();
+            if (!me->IsAlive() || !mytar->IsAlive())
+                return;
+
+            MoveBehind(mytar);
 
             if (!HasRole(BOT_ROLE_DPS))
                 return;
@@ -230,9 +240,9 @@ public:
             if (IsSpellReady(CARRION_SWARM_1, diff) && me->GetPower(POWER_MANA) >= CARRION_COST && Rand() < 80)
             {
                 bool cast = false;
-                if (me->HasInArc(float(M_PI)/2, opponent) && me->GetDistance(opponent) < 25 &&
+                if (me->HasInArc(float(M_PI)/2, mytar) && me->GetDistance(mytar) < 25 &&
                     (IsTank() || GetManaPCT(me) > 60 || me->getAttackers().empty() || GetHealthPCT(me) < 50 ||
-                    opponent->HasAura(SLEEP_1)))
+                    mytar->HasAura(SLEEP_1)))
                 {
                     cast = true;
                 }
@@ -353,8 +363,8 @@ public:
             if (damage && victim != me && spellInfo && spellInfo->GetFirstRankSpell()->Id == CARRION_SWARM_1)
             {
                 int32 basepoints0 = std::min<uint32>(damage, victim->GetHealth());
-                //TC_LOG_ERROR("entities.unit", "OnBotDamageDealt(drl): %s on %s base val %i (%s),",
-                //    me->GetName().c_str(), victim->GetName().c_str(), int32(damage), spellInfo->SpellName[0]);
+                //BOT_LOG_ERROR("entities.unit", "OnBotDamageDealt(drl): {} on {} base val {} ({}),",
+                //    me->GetName(), victim->GetName(), int32(damage), spellInfo->SpellName[0]);
                 CastSpellExtraArgs args(true);
                 args.AddSpellBP0(basepoints0);
                 me->CastSpell(me, SPELL_TRIGGERED_HEAL, args);
@@ -402,21 +412,20 @@ public:
         void SummonBotPet(Position const* sPos)
         {
             if (botPet)
-                UnsummonAll();
+                UnsummonAll(false);
 
             uint32 entry = BOT_PET_INFERNAL;
 
             //Position pos;
 
-            Creature* myPet = me->SummonCreature(entry, *sPos, TEMPSUMMON_CORPSE_TIMED_DESPAWN, std::chrono::milliseconds(2000));
+            Creature* myPet = me->SummonCreature(entry, *sPos, TEMPSUMMON_CORPSE_TIMED_DESPAWN, 2s);
             //me->GetNearPoint(myPet, pos.m_positionX, pos.m_positionY, pos.m_positionZ, 0, 2, me->GetOrientation());
             //myPet->GetMotionMaster()->MovePoint(me->GetMapId(), pos);
-            myPet->SetCreatorGUID(master->GetGUID());
-            myPet->SetOwnerGUID(master->GetGUID());
+            myPet->SetCreator(master);
+            myPet->SetOwnerGUID(me->GetGUID());
             myPet->SetFaction(master->GetFaction());
             myPet->SetControlledByPlayer(!IAmFree());
             myPet->SetPvP(me->IsPvP());
-            myPet->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
             myPet->SetByteValue(UNIT_FIELD_BYTES_2, 1, master->GetByteValue(UNIT_FIELD_BYTES_2, 1));
 
             //immune
@@ -443,10 +452,9 @@ public:
             botPet = myPet;
         }
 
-        void UnsummonAll() override
+        void UnsummonAll(bool savePets = true) override
         {
-            if (botPet)
-                botPet->ToTempSummon()->UnSummon();
+            UnsummonPet(savePets);
         }
 
         void SummonedCreatureDies(Creature* /*summon*/, Unit* /*killer*/) override
@@ -455,7 +463,7 @@ public:
 
         void SummonedCreatureDespawn(Creature* summon) override
         {
-            //TC_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: %s's %s", me->GetName().c_str(), summon->GetName().c_str());
+            //BOT_LOG_ERROR("entities.unit", "SummonedCreatureDespawn: {}'s {}", me->GetName(), summon->GetName());
             if (summon == botPet)
                 botPet = nullptr;
         }
