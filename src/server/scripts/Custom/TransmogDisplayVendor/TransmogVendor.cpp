@@ -315,7 +315,7 @@ public:
                             Creature* vendor = player->GetNPCIfCanInteractWith(creature->GetGUID(), UNIT_NPC_FLAG_VENDOR);
                             if (!vendor)
                             {
-                                TC_LOG_DEBUG("network", "WORLD: SendListInventory - Unit (GUID: %u) not found or you can not interact with him.", creature->GetGUID().GetCounter());
+                                TC_LOG_DEBUG("network", "WORLD: SendListInventory - Unit (GUID: {}) not found or you can not interact with him.", creature->GetGUID().GetCounter());
                                 player->SendSellError(SELL_ERR_CANT_FIND_VENDOR, nullptr, ObjectGuid::Empty, 0);
                                 return true;
                             }
@@ -441,7 +441,7 @@ public:
                 if (it2 == player->transmogMap.end())
                     continue;
 
-                trans->PAppend("REPLACE INTO custom_transmogrification (GUID, FakeEntry, Owner) VALUES (%u, %u, %u)", it2->first.GetCounter(), it2->second, lowguid);
+                trans->PAppend("REPLACE INTO custom_transmogrification (GUID, FakeEntry, Owner) VALUES ({}, {}, {})", it2->first.GetCounter(), it2->second, lowguid);
             }
         }
 
@@ -451,7 +451,7 @@ public:
 
     void OnLogin(Player* player, bool /*firstLogin*/) override
     {
-        QueryResult result = CharacterDatabase.PQuery("SELECT GUID, FakeEntry FROM custom_transmogrification WHERE Owner = %u", player->GetGUID().GetCounter());
+        QueryResult result = CharacterDatabase.PQuery("SELECT GUID, FakeEntry FROM custom_transmogrification WHERE Owner = {}", player->GetGUID().GetCounter());
 
         if (result)
         {
@@ -469,8 +469,8 @@ public:
                 {
                     // Ignore, will be erased on next save.
                     // Additionally this can happen if an item was deleted from DB but still exists for the player
-                    // TC_LOG_ERROR("custom.transmog", "Item entry (Entry: %u, itemGUID: %u, playerGUID: %u) does not exist, ignoring.", fakeEntry, GUID_LOPART(itemGUID), player->GetGUID().GetCounter());
-                    // CharacterDatabase.PExecute("DELETE FROM custom_transmogrification WHERE FakeEntry = %u", fakeEntry);
+                    // TC_LOG_ERROR("custom.transmog", "Item entry (Entry: {}, itemGUID: {}, playerGUID: {}) does not exist, ignoring.", fakeEntry, GUID_LOPART(itemGUID), player->GetGUID().GetCounter());
+                    // CharacterDatabase.PExecute("DELETE FROM custom_transmogrification WHERE FakeEntry = {}", fakeEntry);
                 }
             } while (result->NextRow());
 
@@ -538,7 +538,7 @@ public:
             }
             else
             {
-                TC_LOG_INFO("server.loading", "Too many items for transmogrification: Class: %u SubClass: %u InventoryType: %u Quality: %u", temp.Class, temp.SubClass, TransmogDisplayVendorMgr::getCorrectInvType(temp.InventoryType), temp.Quality);
+                TC_LOG_INFO("server.loading", "Too many items for transmogrification: Class: {} SubClass: {} InventoryType: {} Quality: {}", temp.Class, temp.SubClass, TransmogDisplayVendorMgr::getCorrectInvType(temp.InventoryType), temp.Quality);
             }
         }
 
