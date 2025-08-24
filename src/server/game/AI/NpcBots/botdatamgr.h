@@ -292,6 +292,6 @@ class BotDataMgr
         BotDataMgr(BotDataMgr const&);
 };
 
-uint32 GetNPCBotTransmogDisplayId(Item const* item); // Returns and item_template.displayid: for transmog applied to passed in item if one exists, otherwise for passed in item.  TransmogDisplayVendor/NPCBot compatibility - function used in process of showing transmog on NPCBot
+uint32 GetNPCBotTransmogDisplayId(Item const* item); // Returns an item_template.displayid: for transmog applied to passed in item if one exists, otherwise for passed in item.  TransmogDisplayVendor/NPCBot compatibility - function used in process of showing transmog on NPCBot
 
 #endif

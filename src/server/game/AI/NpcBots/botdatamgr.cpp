@@ -592,17 +592,33 @@ public:
         for (size_t i = 0; i < brackets_shuffled.size() && !teamSpareBotIdsPerClass.empty();) // i is a counter, NOT used as index or value
         {
             uint8 bracket = brackets_shuffled[i];
-
+            // zzBgBotClassLimit start
+            std::unordered_map<uint8, uint8> botsSpawnedPerClass;
+            botsSpawnedPerClass.reserve(BOT_CLASS_END);
+            int8 maxBotsPerClass = count / 5;
+            // zzBgBotClassLimit end
             int8 tries = 100;
             do {
                 --tries;
-                if (GenerateWanderingBotToSpawn(teamSpareBotIdsPerClass.back(), bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
+                auto const& currentBot = teamSpareBotIdsPerClass.back();
+                TC_LOG_DEBUG("server", "Class: {}, SpawnedForClassAlready: {}, maxBotsPerClass: {}", currentBot.first, botsSpawnedPerClass[currentBot.first], maxBotsPerClass);
+                if (botsSpawnedPerClass[currentBot.first] < maxBotsPerClass)
                 {
-                    ++i;
-                    ++spawned;
-                    teamSpareBotIdsPerClass.pop_back();
-                    break;
+                    // zzBgBotClassLimit start
+                    if (GenerateWanderingBotToSpawn(currentBot, bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
+                    // zzBgBotClassLimit end
+                    //if (GenerateWanderingBotToSpawn(teamSpareBotIdsPerClass.back(), bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
+                    {
+                        ++i;
+                        ++spawned;
+                        // zzBgBotClassLimit start
+                        ++botsSpawnedPerClass[currentBot.first];
+                        // zzBgBotClassLimit end
+                        teamSpareBotIdsPerClass.pop_back();
+                        break;
+                    }
                 }
+                
             } while (tries >= 0);
 
             if (tries < 0)
