@@ -429,7 +429,7 @@ public:
     {
         uint32 lowguid = player->GetGUID().GetCounter();
         auto trans = CharacterDatabase.BeginTransaction();
-        trans->PAppend("DELETE FROM custom_transmogrification WHERE Owner = %u AND NOT EXISTS (SELECT 1 FROM item_instance LEFT JOIN character_inventory ON item_instance.guid = character_inventory.item WHERE item_instance.guid = custom_transmogrification.GUID AND character_inventory.guid IS NULL)", lowguid); // TransmogDisplayVendor/NPCBot compatibility - prevent item equipped by NPCBot from being deleted from custom_transmogrification table
+        trans->PAppend("DELETE FROM custom_transmogrification WHERE Owner = {} AND NOT EXISTS (SELECT 1 FROM item_instance LEFT JOIN character_inventory ON item_instance.guid = character_inventory.item WHERE item_instance.guid = custom_transmogrification.GUID AND character_inventory.guid IS NULL)", lowguid); // TransmogDisplayVendor/NPCBot compatibility - prevent item equipped by NPCBot from being deleted from custom_transmogrification table
 
         if (!player->transmogMap.empty())
         {
