@@ -589,31 +589,54 @@ public:
         Bcore::Containers::RandomShuffle(teamSpareBotIdsPerClass);
         Bcore::Containers::RandomShuffle(brackets_shuffled);
 
+        // fork start - zzBgBotClassLimit
+        // check if max bot by class limit is workable given the number of bots of each class available
+        int8 maxBotsPerClass = count / 5;
+        int8 botsAvailableWithConstraints = 0;
+        std::unordered_map<uint8_t, int8> botsAvailablePerClass;
+        std::unordered_map<uint8, uint8> botsSpawnedPerClass;
+        botsAvailablePerClass.reserve(BOT_CLASS_END);
+        botsSpawnedPerClass.reserve(BOT_CLASS_END);
+        
+        for (const auto& entry : teamSpareBotIdsPerClass) {
+            uint8_t category = entry.first;
+            // only count up to maxBotsPerClass
+            if (botsAvailablePerClass[category] < maxBotsPerClass)
+            {
+                botsAvailablePerClass[category]++;
+            }
+        }
+        // now add up the total of number of bots that remain after applying the maxBotsPerClass constraint
+        for (uint8 characterClass = 0; characterClass < botsAvailablePerClass.size(); ++characterClass)
+        {
+            botsAvailableWithConstraints += botsAvailablePerClass[characterClass];
+        }
+        bool skipClassLimit = botsAvailableWithConstraints < count;
+        // fork end - zzBgBotClassLimit
+
         for (size_t i = 0; i < brackets_shuffled.size() && !teamSpareBotIdsPerClass.empty();) // i is a counter, NOT used as index or value
         {
             uint8 bracket = brackets_shuffled[i];
-            // zzBgBotClassLimit start
-            std::unordered_map<uint8, uint8> botsSpawnedPerClass;
-            botsSpawnedPerClass.reserve(BOT_CLASS_END);
-            int8 maxBotsPerClass = count / 5;
-            // zzBgBotClassLimit end
             int8 tries = 100;
             do {
                 --tries;
                 auto const& currentBot = teamSpareBotIdsPerClass.back();
-                TC_LOG_DEBUG("server", "Class: {}, SpawnedForClassAlready: {}, maxBotsPerClass: {}", currentBot.first, botsSpawnedPerClass[currentBot.first], maxBotsPerClass);
-                if (botsSpawnedPerClass[currentBot.first] < maxBotsPerClass)
+                // fork start - zzBgBotClassLimit
+                TC_LOG_DEBUG("ZzCustom", "Class: {}, SpawnedForClassAlready: {}, maxBotsPerClass: {}, Bot: {}", currentBot.first, botsSpawnedPerClass[currentBot.first], maxBotsPerClass, currentBot.second);
+                if (botsSpawnedPerClass[currentBot.first] < maxBotsPerClass || skipClassLimit)
                 {
-                    // zzBgBotClassLimit start
+                    TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} passed max bots per class check, attempting to spawn", currentBot.first, botsSpawnedPerClass[currentBot.first], currentBot.second);
                     if (GenerateWanderingBotToSpawn(currentBot, bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
-                    // zzBgBotClassLimit end
+                    // fork end - zzBgBotClassLimit 
                     //if (GenerateWanderingBotToSpawn(teamSpareBotIdsPerClass.back(), bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
                     {
+                        
                         ++i;
                         ++spawned;
-                        // zzBgBotClassLimit start
+                        // fork start - zzBgBotClassLimit
+                        TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} spawned", currentBot.first, botsSpawnedPerClass[currentBot.first], currentBot.second);
                         ++botsSpawnedPerClass[currentBot.first];
-                        // zzBgBotClassLimit end
+                        // fork end - zzBgBotClassLimit
                         teamSpareBotIdsPerClass.pop_back();
                         break;
                     }
