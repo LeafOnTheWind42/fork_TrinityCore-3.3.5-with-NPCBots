@@ -64,6 +64,7 @@ uint8 _dpsTargetIconFlags;
 uint8 _rangedDpsTargetIconFlags;
 uint8 _noDpsTargetIconFlags;
 uint8 _npcBotOwnerExpireMode;
+uint8 _maxClassPercent; // fork - zzBgBotClassLimit
 int32 _botInfoPacketsLimit;
 uint32 _gearBankCapacity;
 uint32 _gearBankEquipmentSetsCount;
@@ -393,6 +394,7 @@ void BotMgr::LoadConfig(bool reload)
     _npcBotEngageDelayHeal_default  = sConfigMgr->GetIntDefault("NpcBot.EngageDelay.Heal", 0);
     _npcBotOwnerExpireTime          = sConfigMgr->GetIntDefault("NpcBot.OwnershipExpireTime", 0);
     _npcBotOwnerExpireMode          = sConfigMgr->GetIntDefault("NpcBot.OwnershipExpireMode", 0);
+    _maxClassPercent            = sConfigMgr->GetIntDefault("NpcBot.WanderingBots.BG.MaxClassPercent", 20); // fork - zzBgBotClassLimit
     _botPvP                         = sConfigMgr->GetBoolDefault("NpcBot.PvP", true);
     _botMovementFoodInterrupt       = sConfigMgr->GetBoolDefault("NpcBot.Movements.InterruptFood", false);
     _displayEquipment               = sConfigMgr->GetBoolDefault("NpcBot.EquipmentDisplay.Enable", true);
@@ -1062,6 +1064,12 @@ uint8 BotMgr::GetOwnershipExpireMode()
 {
     return _npcBotOwnerExpireMode;
 }
+// fork start - zzBgBotClassLimit
+uint8 BotMgr::GetMaxClassPercent()
+{
+    return _maxClassPercent;
+}
+// fork end - zzBgBotClassLimit
 uint32 BotMgr::GetDesiredWanderingBotsCount()
 {
     return _desiredWanderingBotsCount;

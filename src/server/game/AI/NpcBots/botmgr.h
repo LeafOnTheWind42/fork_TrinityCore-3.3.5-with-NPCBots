@@ -160,6 +160,7 @@ class TC_GAME_API BotMgr
         static uint32 GetBaseUpdateDelay();
         static uint32 GetOwnershipExpireTime();
         static uint8 GetOwnershipExpireMode();
+        static uint8 GetMaxClassPercent(); // fork - zzBgBotClassLimit
         static uint32 GetDesiredWanderingBotsCount();
         static uint32 GetBGTargetTeamPlayersCount(BattlegroundTypeId bgTypeId);
         static float GetBotHKHonorRate();
