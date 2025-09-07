@@ -19,6 +19,7 @@
 #include "Map.h"
 #include "MapManager.h"
 #include "ObjectMgr.h"
+#include "Player.h" // fork - zzTransmogCompatibility
 #include "ScriptMgr.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
@@ -36,6 +37,103 @@ NpcBots DB Data management
 #ifdef _MSC_VER
 # pragma warning(push, 4)
 #endif
+
+
+// temp debugging logging start
+namespace
+{
+void LogDetails(std::string event_name, uint32 bot_entry, Item* item = nullptr)
+{
+	uint32 real_item_entry;
+    uint32 fake_item_entry = 0;
+    uint32 item_guid;
+    uint16 owner;
+    if (item)
+    {
+        real_item_entry = uint32(item->GetEntry());
+        item_guid = uint32(item->GetGUID());
+        owner = uint16(item->GetOwnerGUID());
+        std::pair<uint32, uint32> transmogResult = GetTransmogVendorTransmogData(item);
+        if (transmogResult.first != real_item_entry)
+        {
+            fake_item_entry = transmogResult.first;
+        }
+    }
+    else
+    {
+        real_item_entry = 0;
+        item_guid = 0;
+        owner = 0;
+        fake_item_entry = 0;
+    }
+    if (!bot_entry)
+    {
+        bot_entry = 0;
+    }
+
+    // Show actual item in inventory, regardless of transmog status.  Theory: bag and slot being null post-transmog, after item removed from onto bot is leading to issues.
+    QueryResult inventoryResult = CharacterDatabase.PQuery("SELECT ci.bag, ci.slot FROM item_instance ii INNER JOIN character_inventory ci ON ii.guid = ci.item WHERE ii.owner_guid = {} AND ii.guid = {} AND ii.itemEntry = {}", 
+            owner, item_guid, real_item_entry);
+    if (inventoryResult)
+    {
+        Field* field = inventoryResult->Fetch();
+        uint32 index = 0;
+        uint8 bag = field[index].GetUInt8();
+        uint8 slot = field[++index].GetUInt8();
+
+        TC_LOG_DEBUG("ZzCustom", "\nevent_name,category,status,owner,item_guid,real_item_entry,fake_item_entry,bag,slot,appearance_name\n{},{},{},{},{},{},{},{},{},{}", 
+            event_name, "inventory", "query had records", owner, item_guid, real_item_entry, "n/a", bag, slot, "n/a");
+    }
+    else
+    {
+        TC_LOG_DEBUG("ZzCustom", "\nevent_name,category,status,owner,item_guid,real_item_entry,fake_item_entry,bag,slot,appearance_name\n{},{},{},{},{},{},{},{},{},{}", 
+            event_name, "inventory", "query null result", "", "", "", "", "", "", "");
+    }
+
+	// Show item if transmogged by TransmogDisplayVendor, even when equipped by the bot.  If this returns null, the transmog has been wiped out.
+	if (fake_item_entry)
+    {
+        QueryResult transmogResult = CharacterDatabase.PQuery("SELECT it.Name as appearance_name FROM (item_instance ii INNER JOIN custom_transmogrification ct on ii.guid = ct.GUID) inner join world_fork.item_template it on ct.FakeEntry = it.entry WHERE ct.Owner = {} and ct.GUID = {} and ii.itemEntry = {} and ct.FakeEntry = {}", 
+            owner, item_guid, real_item_entry, fake_item_entry);
+        if (transmogResult)
+        {
+            Field* field = transmogResult->Fetch();
+            std::string appearance_name = field[0].GetString();
+
+            TC_LOG_DEBUG("ZzCustom", "\n{},{},{},{},{},{},{},{},{},{}", 
+                event_name, "transmog", "query had records", owner, item_guid, real_item_entry, fake_item_entry, "n/a", "n/a", appearance_name);
+        }
+        else
+        {
+            TC_LOG_DEBUG("ZzCustom", "\n{},{},{},{},{},{},{},{},{},{}", 
+                event_name, "transmog", "query null result", "", "", "", "", "", "", "");
+        }
+    }
+    else
+    {
+        TC_LOG_DEBUG("ZzCustom", "\n{},{},{},{},{},{},{},{},{},{}", 
+                event_name, "transmog", "no fake_item_entry", "", "", "", "", "", "", "");
+    }
+
+    // Show data related to transmog for this bot and slot, if any, in characters_npcbot_transmog table
+    QueryResult npcbotResult = CharacterDatabase.PQuery("SELECT fake_id as fake_item_entry FROM characters_npcbot_transmog WHERE entry = {} AND item_id = {}", 
+        bot_entry, real_item_entry);
+    if (npcbotResult)
+    {
+        Field* field = npcbotResult->Fetch();
+        uint8 bot_fake_item_entry = field[0].GetUInt32();
+
+        TC_LOG_DEBUG("ZzCustom", "\n{},{},{},{},{},{},{},{},{},{}", 
+            event_name, "npcbot_transmog", "query had records", owner, "n/a", real_item_entry, bot_fake_item_entry, "n/a", "n/a", "n/a");
+    }
+    else
+    {
+        TC_LOG_DEBUG("ZzCustom", "\n{},{},{},{},{},{},{},{},{},{}", 
+            event_name, "npcbot_transmog", "query null result", "", "", "", "", "", "", "");
+    }
+}
+}
+// temp debugging logging end 
 
 typedef std::unordered_map<ObjectGuid /*player_guid*/, NpcBotMgrData*> NpcBotMgrDataMap;
 NpcBotMgrDataMap _botMgrsData;
@@ -591,26 +689,32 @@ public:
 
         // fork start - zzBgBotClassLimit
         // check if max bot by class limit is workable given the number of bots of each class available
-        int8 maxBotsPerClass = count / 5;
+        uint8 maxClassPercent = BotMgr::GetMaxClassPercent();
+        int8 maxBotsPerClass = 0;
         int8 botsAvailableWithConstraints = 0;
+        // the first element in these unordered_maps and vectors is for the class, while the second element is the bot entry
         std::unordered_map<uint8_t, int8> botsAvailablePerClass;
         std::unordered_map<uint8, uint8> botsSpawnedPerClass;
         botsAvailablePerClass.reserve(BOT_CLASS_END);
         botsSpawnedPerClass.reserve(BOT_CLASS_END);
-        
-        for (const auto& entry : teamSpareBotIdsPerClass) {
-            uint8_t category = entry.first;
-            // only count up to maxBotsPerClass
-            if (botsAvailablePerClass[category] < maxBotsPerClass)
+        if (maxClassPercent)
+        {
+            maxBotsPerClass = static_cast<int>(std::round(count * std::min(maxClassPercent, static_cast<uint8>(100)) / 100.0));
+            for (const auto& entry : teamSpareBotIdsPerClass) {
+                uint8_t category = entry.first;
+                // only count up to maxBotsPerClass
+                if (botsAvailablePerClass[category] < maxBotsPerClass)
+                {
+                    botsAvailablePerClass[category]++;
+                }
+            }
+            // now add up the total of number of bots that remain after applying the maxBotsPerClass constraint
+            for (uint8 characterClass = 0; characterClass < botsAvailablePerClass.size(); ++characterClass)
             {
-                botsAvailablePerClass[category]++;
+                botsAvailableWithConstraints += botsAvailablePerClass[characterClass];
             }
         }
-        // now add up the total of number of bots that remain after applying the maxBotsPerClass constraint
-        for (uint8 characterClass = 0; characterClass < botsAvailablePerClass.size(); ++characterClass)
-        {
-            botsAvailableWithConstraints += botsAvailablePerClass[characterClass];
-        }
+        
         bool skipClassLimit = botsAvailableWithConstraints < count;
         // fork end - zzBgBotClassLimit
 
@@ -625,7 +729,15 @@ public:
                 TC_LOG_DEBUG("ZzCustom", "Class: {}, SpawnedForClassAlready: {}, maxBotsPerClass: {}, Bot: {}", currentBot.first, botsSpawnedPerClass[currentBot.first], maxBotsPerClass, currentBot.second);
                 if (botsSpawnedPerClass[currentBot.first] < maxBotsPerClass || skipClassLimit)
                 {
-                    TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} passed max bots per class check, attempting to spawn", currentBot.first, botsSpawnedPerClass[currentBot.first], currentBot.second);
+                    if (skipClassLimit)
+                    {
+                        TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} skipClassLimit = TRUE, attempting to spawn", currentBot.first, currentBot.second);
+                    }
+                    else
+                    {
+                        TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} passed max bots per class check, attempting to spawn", currentBot.first, currentBot.second);
+                    }
+                    
                     if (GenerateWanderingBotToSpawn(currentBot, bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
                     // fork end - zzBgBotClassLimit 
                     //if (GenerateWanderingBotToSpawn(teamSpareBotIdsPerClass.back(), bracket, spawns_a, spawns_h, spawns_n, immediate, bracketEntry, registry))
@@ -634,12 +746,18 @@ public:
                         ++i;
                         ++spawned;
                         // fork start - zzBgBotClassLimit
-                        TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} spawned", currentBot.first, botsSpawnedPerClass[currentBot.first], currentBot.second);
+                        TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} spawned", currentBot.first, currentBot.second);
                         ++botsSpawnedPerClass[currentBot.first];
                         // fork end - zzBgBotClassLimit
                         teamSpareBotIdsPerClass.pop_back();
                         break;
                     }
+                }
+                else
+                {
+                    TC_LOG_DEBUG("ZzCustom", "Class: {}, Bot: {} reached max bots per class limit of {}. Discarding.", currentBot.first, currentBot.second, botsSpawnedPerClass[currentBot.first]);
+                    teamSpareBotIdsPerClass.pop_back(); // discard the bot
+                    break;
                 }
                 
             } while (tries >= 0);
@@ -3008,6 +3126,58 @@ void BotDataMgr::ResetNpcBotTransmogData(uint32 entry, bool update_db)
         _botsTransmogData[entry]->transmogs[i] = { 0, -1 };
 }
 
+// fork start - zzTransmogCompatibility
+// Check if transmogged by NPCBot gossip menu
+uint32 BotDataMgr::GetNpcBotFakeId(Item* item, uint32 entry)
+{
+    uint32 output = 0;
+    uint32 itemEntry = uint32(item->GetEntry());
+    QueryResult result = CharacterDatabase.PQuery("SELECT fake_id FROM characters_npcbot_transmog WHERE item_id = {} and entry = {}", itemEntry, entry);
+    if (result)
+    {
+        Field* field = result->Fetch();
+        uint32 output = field[0].GetUInt32();
+    }
+
+    return output;
+}
+
+// For items given to bot that were transmogged by TransmogDisplayVendor
+void BotDataMgr::LoadTransmogItemIntoTable(Item* item, uint32 entry, uint8 slot)
+{
+    // check if item is transmogged by TransmogDisplayVendor
+    uint32 itemEntry = uint32(item->GetEntry());
+    std::pair<uint32, uint32> transmogResult = GetTransmogVendorTransmogData(item);
+    if (transmogResult.first != itemEntry)
+    {
+        // item is transmogged by TransmogDisplayVendor
+        UpdateNpcBotTransmogData(entry, slot, itemEntry, transmogResult.first, true);
+    } 
+}
+
+// For items the player gets back from the bot, which were transmogged by TransmogDisplayVendor
+void BotDataMgr::RemoveTransmogItemFromTable(Item* item, uint32 entry, uint8 slot, Player* player)
+{
+    // check if item is transmogged by TransmogDisplayVendor
+    uint32 itemEntry = uint32(item->GetEntry());
+    std::pair<uint32, uint32> transmogResult = GetTransmogVendorTransmogData(item);
+    if (transmogResult.first != itemEntry)
+    {
+        // item is transmogged by TransmogDisplayVendor
+        CharacterDatabasePreparedStatement* characterStmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_NPCBOT_TRANSMOG_SLOT);
+        // "DELETE FROM characters_npcbot_transmog WHERE entry = ? and slot = ?"
+        uint32 index = 0;
+        characterStmt->setUInt32(index, entry);
+        characterStmt->setUInt8(++index, slot);
+        CharacterDatabase.Execute(characterStmt);
+
+        _botsTransmogData[entry]->transmogs[slot] = { 0, -1 };
+
+        LogDetails("after removing entry from characters_npcbot_transmog", entry, item); // temp debugging logging
+    }
+}
+// fork end - zzTransmogCompatibility
+
 void BotDataMgr::RegisterBot(Creature const* bot)
 {
     if (_existingBots.find(bot) != _existingBots.end())
@@ -3504,27 +3674,48 @@ void AddSC_botdatamgr_scripts()
 # pragma warning(pop)
 #endif
 
-// TransmogDisplayVendor/NPCBot compatibility start - function used in process of showing transmog on NPCBot
+// fork start - zzTransmogCompatibility - function used in process of showing transmog on NPCBot
 // If a transmog has been applied to the passed-in item this returns the item_template.displayid for the transmog, otherwise the item_template.displayid for the passed-in item is returned
-uint32 GetNPCBotTransmogDisplayId(Item const* item)
+std::pair<uint32, uint32> GetTransmogVendorTransmogData(Item const* item)
 {
-    uint32 outputDisplayId = uint32(item->GetTemplate()->DisplayInfoID);
-    uint32 itemGuiId = uint32(item->GetGUID().GetCounter()); 
-    CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_NPCBOT_TRANSMOG_BY_GUID);
-    //              0
-    // "SELECT it.displayid FROM characters.item_instance ii INNER JOIN characters.custom_transmogrification ct ON ii.guid = ct.GUID 
-    //      INNER JOIN world.item_template it ON ii.itemEntry = it.entry WHERE ct.GUID = ?"
-    
-    stmt->setUInt32(0, itemGuiId);
-    PreparedQueryResult queryResult = CharacterDatabase.Query(stmt);
+    /* Returns item_template.entry, item_template.displayid
+     if a transmog has been applied via TransmogDisplayVendor, these will be for the fake appearance item, else just the item actual values*/
 
-    if (queryResult)
+    uint32 transmogItemEntry; // the item_template.entry that we want the item to look like when transmogged
+    std::pair<uint32, uint32> result = {uint32(item->GetEntry()), uint32(item->GetTemplate()->DisplayInfoID)};  // set default return value for actual item
+    
+    // Avoiding cross-database query, so database qualifers not needed on table name in FROM statement, in case database name is different (e.g. world_test)
+    // Characters database query finds the item_template.entry of the transmog appearance item
+    CharacterDatabasePreparedStatement* characterStmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_NPCBOT_TRANSMOG_BY_GUID);
+    // "SELECT ct.FakeEntry FROM item_instance ii INNER JOIN custom_transmogrification ct ON ii.guid = ct.GUID WHERE ct.GUID = ?"
+    
+    characterStmt->setUInt32(0, uint32(item->GetGUID().GetCounter()));
+    PreparedQueryResult characterQueryResult = CharacterDatabase.Query(characterStmt);
+
+    if (characterQueryResult)
     {
-        Field* queryField = queryResult->Fetch();
-        outputDisplayId = queryField[0].GetUInt32();  // override initial value with transmog displayid value
+        Field* characterQueryField = characterQueryResult->Fetch();
+        transmogItemEntry = characterQueryField[0].GetUInt32();
+    }
+    else
+    {
+        return result;
     }
 
-    return outputDisplayId;
+    // World database query finds the displayid for transmog appearance item
+    WorldDatabasePreparedStatement* worldStmt = WorldDatabase.GetPreparedStatement(WORLD_SEL_ITEM_TEMPLATE_BY_ENTRY);
+    // "SELECT displayid FROM item_template WHERE entry = ?"
+
+    worldStmt->setUInt32(0, transmogItemEntry);
+    PreparedQueryResult worldQueryResult = WorldDatabase.Query(worldStmt);
+
+    if (worldQueryResult)
+    {
+        Field* worldQueryField = worldQueryResult->Fetch();
+        result = {transmogItemEntry, worldQueryField[0].GetUInt32()}; // override initial value with transmog appearance values
+    }  // if not true, that would indicate an orphaned custom_transmogrification entry, which Rochet2's code handles. For this function, just return default
+
+    return result;
 }
-// TransmogDisplayVendor/NPCBot compatibility end - function used in process of showing transmog on NPCBot
+// fork end - zzTransmogCompatibility
 

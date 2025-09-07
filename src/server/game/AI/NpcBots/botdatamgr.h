@@ -4,6 +4,7 @@
 #include "botcommon.h"
 #include "DatabaseEnvFwd.h"
 #include "DBCEnums.h"
+#include "cmath" // zzBgBotClassLimit
 
 #include <functional>
 #include <map>
@@ -230,6 +231,9 @@ class BotDataMgr
         static NpcBotTransmogData const* SelectNpcBotTransmogs(uint32 entry);
         static void UpdateNpcBotTransmogData(uint32 entry, uint8 slot, uint32 item_id, int32 fake_id, bool update_db = true);
         static void ResetNpcBotTransmogData(uint32 entry, bool update_db = true);
+        static uint32 GetNpcBotFakeId(Item* item, uint32 entry); // fork - zzTransmogCompatibility
+        static void LoadTransmogItemIntoTable(Item* item, uint32 entry, uint8 slot); // fork - zzTransmogCompatibility
+        static void RemoveTransmogItemFromTable(Item* item, uint32 entry, uint8 slot, Player* player); // fork - zzTransmogCompatibility
 
         static bool AllBotsLoaded();
 
@@ -292,6 +296,6 @@ class BotDataMgr
         BotDataMgr(BotDataMgr const&);
 };
 
-uint32 GetNPCBotTransmogDisplayId(Item const* item); // Returns an item_template.displayid: for transmog applied to passed in item if one exists, otherwise for passed in item.  TransmogDisplayVendor/NPCBot compatibility - function used in process of showing transmog on NPCBot
+std::pair<uint32, uint32> GetTransmogVendorTransmogData(Item const* item); // fork - zzTransmogCompatibility
 
 #endif
