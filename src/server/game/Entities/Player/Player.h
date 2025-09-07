@@ -1186,7 +1186,7 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
         void SetVisibleItemSlot(uint8 slot, Item* pItem);
         Item* BankItem(ItemPosCountVec const& dest, Item* pItem, bool update);
         void RemoveItem(uint8 bag, uint8 slot, bool update);
-        void MoveItemFromInventory(uint8 bag, uint8 slot, bool update);
+        void MoveItemFromInventory(uint8 bag, uint8 slot, bool update, bool npcBot = false); // fork - zzTransmogCompatibility
                                                             // in trade, auction, guild bank, mail....
         void MoveItemToInventory(ItemPosCountVec const& dest, Item* pItem, bool update, bool in_characterInventoryDB = false);
                                                             // in trade, guild bank, mail....

@@ -4789,6 +4789,22 @@ NpcBot.WanderingBots.BG.TargetTeamPlayersCount.SA = 0
 NpcBot.WanderingBots.BG.TargetTeamPlayersCount.IC = 0
 
 #
+#    NpcBot.WanderingBots.BG.MaxClassPercent
+#        Description:   Determine limit on the number of spawned BG bots for each class based on total bots that need to be spawned.  Calculated independently per side.
+#        Note:          To get to the max number of bots per class in a BG: Bots to spawn times this value divided by 100
+#						Caveat: If the initial pool of available wandering bots used to spawn into the BG isn't high enough, this limit could prevent the BG from being 
+#                       filled up completely; in that case this limit is skipped.
+#        Examples: 	    NpcBot.WanderingBots.BG.MaxClassPercent = 20
+#                       In AB if 13 slots need to be filled by bots, then round(13 * 20 / 100) = 3 is the cap for any one class
+#                       If only 12 needed, then round(12 * 20 / 100) = 2
+#
+#                       15*20/100 = 3 maximum bots spawned for each class.  Some classes will be less than 3, but none more than 3, barring the caveat above.
+#        Default:     	20 - (Number of bots to spawn per side * 20 /100 = max number of bots spawned for each class)
+#                     	0  - (No limit)
+
+NpcBot.WanderingBots.BG.MaxClassPercent = 20
+
+#
 #    NpcBot.WanderingBots.Classes.<Class>.Enable
 #        Description: Allow players to hire bots of certain classes.
 #        Note:        Some non-standard class abilities may be unbalanced or game breaking.

@@ -693,18 +693,9 @@ void WorldSession::HandleMirrorImageDataRequest(WorldPacket& recvData)
                     data << uint32(0);
                     continue;
                 }
-                // npcbots change start, conflicted with mine, reinstituting mine
-                // uint32 display_id = bot->GetBotAI()->GetEquipDisplayId(slot);
-                // if (display_id)
-                //     data << uint32(display_id);
-                // npcbots change end
-                // zzTransmogCompatibility start 
-                // this is what I had before npcbots change 
-                // ToDo - figure out if I still need something from below to get my changes to work
-                Item const* item = bot->GetBotEquips(slot);
-                if (item)
-                    data << GetNPCBotTransmogDisplayId(item); // TransmogDisplayVendor/NPCBot compatibility - show transmog on NPCBot
-                // zzTransmogCompatibility end
+                uint32 display_id = bot->GetBotAI()->GetEquipDisplayId(slot);
+                if (display_id)
+                    data << uint32(display_id);
                 else
                 {
                     //don't allow to go naked

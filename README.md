@@ -100,7 +100,7 @@ The cap by default is 20% per this world.conf setting that you can change: NpcBo
 It keeps track of the number of bots of each class spawned into the BG.  If the class of the next bot selected in the loop already has reached that cap, it will skip that bot and continue to the next iteration.  
 
 Examples: 
-* In AB if 14 slots need to be filled by bots, then round(13 * 20 / 100) = 3 is the cap for any one class
+* In AB if 13 slots need to be filled by bots, then round(13 * 20 / 100) = 3 is the cap for any one class
 * If only 12 needed, then round(12 * 20 / 100) = 2
 
 In order to avoid issues, the cap will be skipped if it would prevent the BG from being filled up completely.  In other words, if the pool of available wandering bots wouldn't be large enough to fill up the BG if the cap was implemented, no cap will be applied.  If that case you would want to add more wandering bots to balance out the classes more.

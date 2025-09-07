@@ -422,6 +422,27 @@ public:
                     if (Item* pItem = pBag->GetItemByPos(j))
                         itemlist.push_back(pItem->GetGUID());
 
+        // fork start - zzTransmogCompatibility
+        // factor in NPCBot inventory and gear storage
+        CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_NPCBOT_ITEM_GUID);
+        // SELECT equipMhEx AS item_guid FROM characters_npcbot WHERE owner = ? and equipMhEx <> 0 UNION SELECT equipOhEx AS item_guid FROM characters_npcbot WHERE owner = ? and equipOhEx <> 0 UNION SELECT equipRhEx AS item_guid FROM characters_npcbot WHERE owner = ? and equipRhEx <> 0 UNION SELECT equipHead AS item_guid FROM characters_npcbot WHERE owner = ? and equipHead <> 0 UNION SELECT equipShoulders AS item_guid FROM characters_npcbot WHERE owner = ? and equipShoulders <> 0 UNION SELECT equipChest AS item_guid FROM characters_npcbot WHERE owner = ? and equipChest <> 0 UNION SELECT equipWaist AS item_guid FROM characters_npcbot WHERE owner = ? and equipWaist <> 0 UNION SELECT equipLegs AS item_guid FROM characters_npcbot WHERE owner = ? and equipLegs <> 0 UNION SELECT equipFeet AS item_guid FROM characters_npcbot WHERE owner = ? and equipFeet <> 0 UNION SELECT equipWrist AS item_guid FROM characters_npcbot WHERE owner = ? and equipWrist <> 0 UNION SELECT equipHands AS item_guid FROM characters_npcbot WHERE owner = ? and equipHands <> 0 UNION SELECT equipBack AS item_guid FROM characters_npcbot WHERE owner = ? and equipBack <> 0 UNION SELECT equipBody AS item_guid FROM characters_npcbot WHERE owner = ? and equipBody <> 0 UNION SELECT item_guid FROM characters_npcbot_gear_storage WHERE guid = ? and item_guid <>0;
+        uint32 playerGuid = uint32(player->GetGUID().GetCounter());
+        for (size_t i = 0; i < stmt->GetParameters().size(); ++i) {
+            stmt->setUInt32(i, playerGuid);
+        }
+        PreparedQueryResult queryResult = CharacterDatabase.Query(stmt);
+
+        if (queryResult)
+        {
+            while (queryResult->NextRow()) 
+            {
+                Field* queryField = queryResult->Fetch();
+                ObjectGuid itemGuid(queryField[0].GetUInt64());
+                itemlist.push_back(itemGuid);
+            }
+        }
+        // fork end - zzTransmogCompatibility
+
         return itemlist;
     }
 
@@ -429,7 +450,7 @@ public:
     {
         uint32 lowguid = player->GetGUID().GetCounter();
         auto trans = CharacterDatabase.BeginTransaction();
-        trans->PAppend("DELETE FROM custom_transmogrification WHERE Owner = {} AND NOT EXISTS (SELECT 1 FROM item_instance LEFT JOIN character_inventory ON item_instance.guid = character_inventory.item WHERE item_instance.guid = custom_transmogrification.GUID AND character_inventory.guid IS NULL)", lowguid); // TransmogDisplayVendor/NPCBot compatibility - prevent item equipped by NPCBot from being deleted from custom_transmogrification table
+        trans->PAppend("DELETE FROM custom_transmogrification WHERE Owner = {}", lowguid);
 
         if (!player->transmogMap.empty())
         {

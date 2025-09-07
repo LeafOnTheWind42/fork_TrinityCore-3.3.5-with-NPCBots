@@ -12392,13 +12392,17 @@ void Player::RemoveItem(uint8 bag, uint8 slot, bool update)
 
 extern void RemoveReforge(Player* player, uint32 itemguid, bool update);
 // Common operation need to remove item from inventory without delete in trade, auction, guild bank, mail....
-void Player::MoveItemFromInventory(uint8 bag, uint8 slot, bool update)
+// void Player::MoveItemFromInventory(uint8 bag, uint8 slot, bool update)
+void Player::MoveItemFromInventory(uint8 bag, uint8 slot, bool update, bool npcBot)  // fork - zzTransmogCompatibility
 {
     if (Item* it = GetItemByPos(bag, slot))
     {
         RemoveItem(bag, slot, update);
-        TransmogDisplayVendorMgr::DeleteFakeEntry(this, it);
-        RemoveReforge(this, it->GetGUID().GetCounter(), true);
+        if (!npcBot) // fork - zzTransmogCompatibility
+        { // fork - zzTransmogCompatibility
+            TransmogDisplayVendorMgr::DeleteFakeEntry(this, it);
+            RemoveReforge(this, it->GetGUID().GetCounter(), true);
+        } // fork - zzTransmogCompatibility
         ItemRemovedQuestCheck(it->GetEntry(), it->GetCount());
         it->SetNotRefundable(this, false);
         RemoveItemFromUpdateQueueOf(it, this);
